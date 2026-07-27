@@ -191,6 +191,7 @@ function updateRateDrum(value) {
 function renderStatus() {
   const status = state.status;
   if (!status) return;
+  document.title = `FX Tape · ${status.pair}`;
   const lastSync = status.last_sync;
   const failed = lastSync?.status === "failed";
   const isRunning = status.collector_running;
@@ -210,7 +211,7 @@ function renderStatus() {
     status.provider === "demo" ? "Market simulator" : "IB Gateway";
   document.querySelector("#source-detail").textContent =
     status.provider === "demo"
-      ? "Deterministic USD/GBP feed"
+      ? `Deterministic ${status.pair} feed`
       : `${status.gateway_host}:${status.gateway_port} · socket API`;
 
   const collectorStage = document.querySelector('[data-stage="collector"]');

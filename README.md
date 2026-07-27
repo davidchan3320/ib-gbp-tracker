@@ -1,6 +1,6 @@
 # FX Tape
 
-FX Tape collects one-minute USD/GBP bid, ask, and midpoint bars from Interactive Brokers Gateway.
+FX Tape collects one-minute GBP/USD bid, ask, and midpoint bars from Interactive Brokers Gateway.
 It stores each OHLC series plus any available volume, weighted-average price, and trade count in
 SQLite or PostgreSQL, calculates midpoint metrics, and serves a responsive dashboard plus a
 documented REST API. A separate CLI owns the resumable historical backfill.
@@ -9,7 +9,30 @@ The app starts in **demo mode**, so the entire collector, database, chart, and m
 evaluated without an IB account. Switching one environment variable activates the real IB
 Gateway provider.
 
-## Quick start
+## Docker quick start
+
+Requirements: Docker Engine with the Compose plugin.
+
+```bash
+cp .env.example .env
+docker compose up --build -d app
+```
+
+This starts the API and PostgreSQL in demo mode. Open
+[http://127.0.0.1:8000](http://127.0.0.1:8000), inspect the containers with
+`docker compose ps`, or follow API logs with:
+
+```bash
+docker compose logs -f app
+```
+
+Stop the stack with `docker compose down`. The named PostgreSQL volume is retained; running
+`docker compose down -v` also deletes all stored market data.
+
+The image runs as an unprivileged user, has a built-in API health check, and uses a read-only root
+filesystem under Compose. Build it without starting services using `docker compose build app`.
+
+## Local quick start
 
 Requirements: Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
@@ -52,6 +75,10 @@ IB_CLIENT_ID=21
 IB_BACKFILL_CLIENT_ID=22
 ```
 
+When the app runs in Docker, leave `IB_DOCKER_HOST=host.docker.internal`. Compose maps that name to
+the Docker host on Linux and Docker Desktop. `IB_HOST` remains available for running the app
+directly outside a container.
+
 Restart the app, then use **Sync now**. The latest sync state is kept in memory and shown in the
 Data pulse panel; it is not written to the database. The IB adapter makes `BID`, `ASK`, and
 `MIDPOINT` historical requests with `useRTH=false` and `formatDate=2`; all stored timestamps are
@@ -66,10 +93,10 @@ streaming top-of-book data. If the connection works but no history arrives, chec
 market-data permissions and the same instrument in a Gateway/TWS chart. See
 [IB historical market data](https://interactivebrokers.github.io/tws-api/historical_data.html).
 
-`FX_PAIR=USDGBP` means **GBP per 1 USD**. If the intended convention is USD per 1 GBP, use
-`FX_PAIR=GBPUSD` instead.
+The default `FX_PAIR=GBPUSD` means **USD per 1 GBP**. For the inverse convention—GBP per 1 USD—set
+`FX_PAIR=USDGBP` and use a separate database because the configured pair is not stored on each row.
 
-## PostgreSQL
+## PostgreSQL for local development
 
 SQLite is the zero-setup default. For PostgreSQL:
 
@@ -83,8 +110,9 @@ Then set:
 DATABASE_URL=postgresql+asyncpg://fx_tape:fx_tape_local@127.0.0.1:5432/fx_tape
 ```
 
-The Compose credentials are development-only. Use secret-managed credentials and a managed
-database in production.
+The full Compose stack configures its internal database connection automatically. The Compose
+credentials are development-only; use secret-managed credentials and a managed database in
+production.
 
 ## How collection works
 
@@ -150,6 +178,23 @@ uv run fx-tape backfill run
 uv run fx-tape backfill status
 ```
 
+With Docker Compose, the equivalent commands use the opt-in `backfill` service:
+
+```bash
+docker compose run --rm backfill
+docker compose run --rm backfill fx-tape backfill status
+```
+
+The first command starts or resumes the backfill. For a detached worker, use:
+
+```bash
+docker compose --profile backfill up -d backfill
+docker compose logs -f backfill
+```
+
+`docker compose stop backfill` sends a graceful interrupt so the current checkpoint is preserved.
+The normal `docker compose up` command does not start this profile.
+
 `run` resumes the durable cursor by default. Use `uv run fx-tape backfill run --restart` only when
 intentionally discarding progress and resetting the cursor to the current minute. Pressing
 `Ctrl+C` cancels cleanly after preserving the current checkpoint. Add `--json` to either command
@@ -212,6 +257,9 @@ app/
   services/collector.py    incremental collection orchestration
   services/metrics.py      extensible metric calculations
   static/                  dependency-free dashboard
+Dockerfile                 non-root multi-stage API/CLI image
+compose.yaml               API, optional backfill worker, and PostgreSQL
+.dockerignore              minimal Docker build context
 scripts/export_openapi.py  deterministic OpenAPI export
 openapi.json               generated API contract
 tests/                     API, collector, and metric tests

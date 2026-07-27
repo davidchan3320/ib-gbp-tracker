@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "FX Tape API",
-    "description": "Collect and inspect one-minute USD/GBP bid, ask, and midpoint OHLC bars.",
+    "description": "Collect and inspect one-minute GBP/USD bid, ask, and midpoint OHLC bars.",
     "version": "0.4.0"
   },
   "paths": {

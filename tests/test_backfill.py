@@ -40,7 +40,7 @@ class StubHistoricalProvider(HistoricalDataProvider):
         end_at: datetime | None = None,
         allow_empty: bool = False,
     ) -> list[PriceBar]:
-        assert pair == "USDGBP"
+        assert pair == "GBPUSD"
         assert bar_size == "1 min"
         assert duration == "1 D"
         assert end_at is not None
@@ -52,7 +52,7 @@ class StubHistoricalProvider(HistoricalDataProvider):
         self.ends.append(end_at)
 
         timestamp = end_at - timedelta(minutes=1)
-        base = Decimal("0.77000")
+        base = Decimal("1.29000")
         return [
             PriceBar(
                 price_type=price_type,

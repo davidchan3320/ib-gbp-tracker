@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     ib_backfill_client_id: int = Field(default=22, ge=0)
     ib_timeout_seconds: float = Field(default=12.0, gt=0, le=120)
 
-    fx_pair: str = "USDGBP"
+    fx_pair: str = "GBPUSD"
     bar_size: str = "1 min"
     history_duration: str = "1 D"
     sync_interval_seconds: int = Field(default=60, ge=15)

@@ -6,7 +6,7 @@ from app.providers.demo import DemoHistoricalDataProvider
 
 async def test_demo_provider_returns_valid_chronological_bars() -> None:
     provider = DemoHistoricalDataProvider()
-    bars = await provider.fetch_bars(pair="USDGBP", bar_size="1 min", duration="3600 S")
+    bars = await provider.fetch_bars(pair="GBPUSD", bar_size="1 min", duration="3600 S")
 
     assert len(bars) == 80 * 3
     assert bars == sorted(bars, key=lambda bar: bar.timestamp)
@@ -18,6 +18,7 @@ async def test_demo_provider_returns_valid_chronological_bars() -> None:
         for bar in bars
     )
     assert all(bar.trade_count is not None and bar.trade_count > 0 for bar in bars)
+    assert all(bar.close > 1 for bar in bars)
 
     by_timestamp = defaultdict(dict)
     for bar in bars:

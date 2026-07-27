@@ -40,8 +40,8 @@ async def test_cli_run_persists_a_checkpoint_and_status_reads_it(
 
 async def test_sqlite_backfill_lock_rejects_a_second_worker(tmp_path: Path) -> None:
     database = Database(f"sqlite+aiosqlite:///{tmp_path / 'lock.db'}")
-    first = BackfillRunLock(database, "demo:usdgbp:1_min")
-    second = BackfillRunLock(database, "demo:usdgbp:1_min")
+    first = BackfillRunLock(database, "demo:gbpusd:1_min")
+    second = BackfillRunLock(database, "demo:gbpusd:1_min")
     try:
         await first.acquire()
         with pytest.raises(BackfillLockError):

@@ -1,4 +1,4 @@
-.PHONY: dev test lint format openapi postgres
+.PHONY: dev test lint format openapi postgres docker-build docker-up docker-down
 
 dev:
 	uv run uvicorn app.main:app --reload
@@ -17,3 +17,12 @@ openapi:
 
 postgres:
 	docker compose up -d db
+
+docker-build:
+	docker compose build app
+
+docker-up:
+	docker compose up -d app
+
+docker-down:
+	docker compose down

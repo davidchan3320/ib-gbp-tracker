@@ -61,8 +61,8 @@ class DemoHistoricalDataProvider(HistoricalDataProvider):
         for index in range(count):
             epoch = first_epoch + index * interval
             slot = epoch // interval
-            open_price = self._price_at(slot - 1)
-            close_price = self._price_at(slot)
+            open_price = self._price_at(slot - 1, pair)
+            close_price = self._price_at(slot, pair)
             wick = Decimal(str(0.00028 + 0.00018 * abs(math.sin(slot / 3.7))))
             high = max(open_price, close_price) + wick
             low = min(open_price, close_price) - (wick * Decimal("0.82"))
@@ -90,7 +90,7 @@ class DemoHistoricalDataProvider(HistoricalDataProvider):
         return bars
 
     @staticmethod
-    def _price_at(slot: int) -> Decimal:
+    def _price_at(slot: int, pair: str) -> Decimal:
         # Multiple cycles make the demo feel market-like while remaining stable per timestamp.
         value = (
             0.7752
@@ -98,6 +98,8 @@ class DemoHistoricalDataProvider(HistoricalDataProvider):
             + 0.0017 * math.sin(slot / 5.3)
             + 0.0008 * math.cos(slot / 2.1)
         )
+        if pair == "GBPUSD":
+            value = 1 / value
         return Decimal(str(value))
 
     @staticmethod

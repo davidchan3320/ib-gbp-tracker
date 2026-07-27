@@ -49,7 +49,7 @@ async def test_ib_provider_requests_midpoint_bars_in_readonly_mode(monkeypatch) 
 
     end_at = datetime(2026, 7, 27, tzinfo=UTC)
     bars = await provider.fetch_bars(
-        pair="USDGBP",
+        pair="GBPUSD",
         bar_size="1 min",
         duration="1 D",
         end_at=end_at,

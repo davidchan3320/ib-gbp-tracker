@@ -24,7 +24,7 @@ def test_demo_sync_persists_and_exposes_bars(tmp_path: Path) -> None:
         bars_response = client.get("/api/v1/bars", params={"limit": 25})
         assert bars_response.status_code == 200
         payload = bars_response.json()
-        assert payload["pair"] == "USD/GBP"
+        assert payload["pair"] == "GBP/USD"
         assert payload["bar_size"] == "1 min"
         assert payload["price_type"] == "midpoint"
         assert payload["count"] == 25
@@ -44,6 +44,7 @@ def test_demo_sync_persists_and_exposes_bars(tmp_path: Path) -> None:
         assert payload["bars"][0]["weighted_average_price"] > 0
         assert payload["bars"][0]["trade_count"] > 0
         assert all(bar["price_type"] == "midpoint" for bar in payload["bars"])
+        assert all(bar["close"] > 1 for bar in payload["bars"])
 
         bid_payload = client.get("/api/v1/bars", params={"price_type": "bid", "limit": 25}).json()
         ask_payload = client.get("/api/v1/bars", params={"price_type": "ask", "limit": 25}).json()
