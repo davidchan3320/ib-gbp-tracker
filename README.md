@@ -117,6 +117,18 @@ The full Compose stack configures its internal database connection automatically
 credentials are development-only; use secret-managed credentials and a managed database in
 production.
 
+### Adminer database UI
+
+Start Adminer with PostgreSQL:
+
+```bash
+docker compose up -d adminer
+```
+
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080) and sign in with system `PostgreSQL`, server
+`db`, username `fx_tape`, password `fx_tape_local`, and database `fx_tape`. These values follow the
+`POSTGRES_*` settings in `.env`; the UI port can be changed with `ADMINER_PORT`.
+
 ## How collection works
 
 ```text

@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -5,6 +6,28 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+
+
+def test_startup_logs_database_connection_without_password(caplog, monkeypatch) -> None:
+    password = "do-not-log-this"
+    settings = Settings(
+        database_url=f"postgresql+asyncpg://fx_tape:{password}@db:5432/fx_tape",
+        scheduler_enabled=False,
+    )
+    app = create_app(settings)
+
+    async def create_schema() -> None:
+        pass
+
+    monkeypatch.setattr(app.state.database, "create_schema", create_schema)
+
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        with TestClient(app):
+            pass
+
+    assert "Database connected: backend=postgresql" in caplog.text
+    assert "url=postgresql+asyncpg://fx_tape:***@db:5432/fx_tape" in caplog.text
+    assert password not in caplog.text
 
 
 def test_demo_sync_persists_and_exposes_bars(tmp_path: Path) -> None:

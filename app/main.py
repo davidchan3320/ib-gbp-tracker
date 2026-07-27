@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -26,6 +27,7 @@ from app.services.repository import BarRepository
 from app.services.scheduler import CollectorScheduler
 
 STATIC_DIR = Path(__file__).parent / "static"
+logger = logging.getLogger("uvicorn.error")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -43,6 +45,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await database.create_schema()
+        database_url = database.engine.url.render_as_string(hide_password=True)
+        logger.info(
+            "Database connected: backend=%s url=%s",
+            runtime_settings.database_backend,
+            database_url,
+        )
         try:
             if runtime_settings.scheduler_enabled:
                 scheduler.start(run_immediately=runtime_settings.sync_on_startup)
