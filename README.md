@@ -32,6 +32,9 @@ Stop the stack with `docker compose down`. The named PostgreSQL volume is retain
 The image runs as an unprivileged user, has a built-in API health check, and uses a read-only root
 filesystem under Compose. Build it without starting services using `docker compose build app`.
 
+See [Database design, migration, and first setup](docs/database.md) for the complete PostgreSQL and
+SQLite schema, startup migration behavior, environment configuration, and inspection commands.
+
 ## Local quick start
 
 Requirements: Python 3.11+ and [uv](https://docs.astral.sh/uv/).
@@ -260,6 +263,7 @@ app/
 Dockerfile                 non-root multi-stage API/CLI image
 compose.yaml               API, optional backfill worker, and PostgreSQL
 .dockerignore              minimal Docker build context
+docs/database.md           schema, migration, and first-environment setup
 scripts/export_openapi.py  deterministic OpenAPI export
 openapi.json               generated API contract
 tests/                     API, collector, and metric tests
