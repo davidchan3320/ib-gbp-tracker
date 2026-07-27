@@ -1,0 +1,654 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FX Tape API",
+    "description": "Collect and inspect one-minute USD/GBP bid, ask, and midpoint OHLC bars.",
+    "version": "0.4.0"
+  },
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Health",
+        "operationId": "health_healthz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Health Healthz Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/bars": {
+      "get": {
+        "tags": [
+          "market data"
+        ],
+        "summary": "Get Bars",
+        "operationId": "get_bars_api_v1_bars_get",
+        "parameters": [
+          {
+            "name": "price_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PriceType",
+              "default": "midpoint"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 10000,
+              "minimum": 1,
+              "default": 1440,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BarsEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/metrics": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "Get Metrics",
+        "operationId": "get_metrics_api_v1_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Get Status",
+        "operationId": "get_status_api_v1_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sync": {
+      "post": {
+        "tags": [
+          "market data"
+        ],
+        "summary": "Run Sync",
+        "operationId": "run_sync_api_v1_sync_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BarResponse": {
+        "properties": {
+          "price_type": {
+            "$ref": "#/components/schemas/PriceType"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Timestamp"
+          },
+          "open": {
+            "type": "number",
+            "title": "Open"
+          },
+          "high": {
+            "type": "number",
+            "title": "High"
+          },
+          "low": {
+            "type": "number",
+            "title": "Low"
+          },
+          "close": {
+            "type": "number",
+            "title": "Close"
+          },
+          "volume": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume"
+          },
+          "weighted_average_price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weighted Average Price"
+          },
+          "trade_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trade Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "price_type",
+          "timestamp",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume",
+          "weighted_average_price",
+          "trade_count"
+        ],
+        "title": "BarResponse"
+      },
+      "BarsEnvelope": {
+        "properties": {
+          "pair": {
+            "type": "string",
+            "title": "Pair"
+          },
+          "bar_size": {
+            "type": "string",
+            "title": "Bar Size"
+          },
+          "price_type": {
+            "$ref": "#/components/schemas/PriceType"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "bars": {
+            "items": {
+              "$ref": "#/components/schemas/BarResponse"
+            },
+            "type": "array",
+            "title": "Bars"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pair",
+          "bar_size",
+          "price_type",
+          "count",
+          "bars"
+        ],
+        "title": "BarsEnvelope"
+      },
+      "ErrorResponse": {
+        "properties": {
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "ErrorResponse"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "MetricsResponse": {
+        "properties": {
+          "pair": {
+            "type": "string",
+            "title": "Pair"
+          },
+          "bar_size": {
+            "type": "string",
+            "title": "Bar Size"
+          },
+          "price_type": {
+            "$ref": "#/components/schemas/PriceType"
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time",
+            "title": "As Of"
+          },
+          "latest_close": {
+            "type": "number",
+            "title": "Latest Close"
+          },
+          "change_24h_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change 24H Pct"
+          },
+          "high_24h": {
+            "type": "number",
+            "title": "High 24H"
+          },
+          "low_24h": {
+            "type": "number",
+            "title": "Low 24H"
+          },
+          "sma_20": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sma 20"
+          },
+          "atr_14": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Atr 14"
+          },
+          "realized_volatility_20_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Realized Volatility 20 Pct"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pair",
+          "bar_size",
+          "price_type",
+          "as_of",
+          "latest_close",
+          "change_24h_pct",
+          "high_24h",
+          "low_24h",
+          "sma_20",
+          "atr_14",
+          "realized_volatility_20_pct"
+        ],
+        "title": "MetricsResponse"
+      },
+      "PriceType": {
+        "type": "string",
+        "enum": [
+          "bid",
+          "ask",
+          "midpoint"
+        ],
+        "title": "PriceType"
+      },
+      "StatusResponse": {
+        "properties": {
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "pair": {
+            "type": "string",
+            "title": "Pair"
+          },
+          "bar_size": {
+            "type": "string",
+            "title": "Bar Size"
+          },
+          "price_types": {
+            "items": {
+              "$ref": "#/components/schemas/PriceType"
+            },
+            "type": "array",
+            "title": "Price Types"
+          },
+          "database": {
+            "type": "string",
+            "title": "Database"
+          },
+          "scheduler_enabled": {
+            "type": "boolean",
+            "title": "Scheduler Enabled"
+          },
+          "sync_interval_seconds": {
+            "type": "integer",
+            "title": "Sync Interval Seconds"
+          },
+          "collector_running": {
+            "type": "boolean",
+            "title": "Collector Running"
+          },
+          "stored_bars": {
+            "type": "integer",
+            "title": "Stored Bars"
+          },
+          "gateway_host": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Host"
+          },
+          "gateway_port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Port"
+          },
+          "last_sync": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncRunResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "provider",
+          "pair",
+          "bar_size",
+          "price_types",
+          "database",
+          "scheduler_enabled",
+          "sync_interval_seconds",
+          "collector_running",
+          "stored_bars",
+          "gateway_host",
+          "gateway_port",
+          "last_sync"
+        ],
+        "title": "StatusResponse"
+      },
+      "SyncResponse": {
+        "properties": {
+          "run_id": {
+            "type": "integer",
+            "title": "Run Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "bars_received": {
+            "type": "integer",
+            "title": "Bars Received"
+          },
+          "bars_written": {
+            "type": "integer",
+            "title": "Bars Written"
+          },
+          "incremental": {
+            "type": "boolean",
+            "title": "Incremental"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "status",
+          "bars_received",
+          "bars_written",
+          "incremental"
+        ],
+        "title": "SyncResponse"
+      },
+      "SyncRunResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "bars_received": {
+            "type": "integer",
+            "title": "Bars Received"
+          },
+          "bars_written": {
+            "type": "integer",
+            "title": "Bars Written"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "provider",
+          "status",
+          "started_at",
+          "completed_at",
+          "bars_received",
+          "bars_written",
+          "message"
+        ],
+        "title": "SyncRunResponse"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

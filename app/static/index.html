@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#e8f0f2" />
+    <meta
+      name="description"
+      content="Inspect one-minute USD/GBP midpoint history collected from Interactive Brokers Gateway."
+    />
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/app.css" />
+    <title>FX Tape · USD/GBP</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to market data</a>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="FX Tape home">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>FX<span class="brand-slash">/</span>TAPE</span>
+        </a>
+
+        <div class="market-clocks" aria-label="Market clocks">
+          <span><b>HKG</b> <time id="clock-hkg">--:--</time></span>
+          <span><b>LDN</b> <time id="clock-ldn">--:--</time></span>
+          <span><b>NYC</b> <time id="clock-nyc">--:--</time></span>
+        </div>
+
+        <div class="topbar-actions">
+          <div class="connection-pill" id="connection-pill" data-state="loading">
+            <span class="status-light" aria-hidden="true"></span>
+            <span id="connection-label">Reading collector</span>
+          </div>
+          <button class="sync-button" id="sync-button" type="button">
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <path d="M16 7a6.5 6.5 0 0 0-11-2L3 7m1-4v4H0M4 13a6.5 6.5 0 0 0 11 2l2-2m-1 4v-4h4" />
+            </svg>
+            <span>Sync now</span>
+          </button>
+        </div>
+      </header>
+
+      <main id="main-content">
+        <section class="instrument-header" aria-labelledby="instrument-title">
+          <div class="instrument-name">
+            <p class="eyebrow">IDEALPRO · MIDPOINT</p>
+            <h1 id="instrument-title">
+              <span id="base-currency">USD</span><i>/</i><span id="quote-currency">GBP</span>
+            </h1>
+            <p class="instrument-meta">
+              <span id="bar-size-label">1 min bars</span>
+              <span aria-hidden="true">·</span>
+              <span>UTC normalized</span>
+            </p>
+          </div>
+
+          <div class="rate-drum" aria-live="polite" aria-label="Latest exchange rate">
+            <p>Latest midpoint</p>
+            <div class="rate-digits" id="rate-digits" aria-hidden="true">
+              <span>0</span><em>.</em><span>0</span><span>0</span><span>0</span><span>0</span>
+            </div>
+            <span class="sr-only" id="rate-readable">No quote loaded</span>
+            <div class="rate-change neutral" id="rate-change">Waiting for bars</div>
+          </div>
+        </section>
+
+        <section class="metric-tape" aria-label="Market metrics">
+          <dl>
+            <div>
+              <dt>24h range</dt>
+              <dd id="metric-range">—</dd>
+              <small id="metric-range-width">—</small>
+            </div>
+            <div>
+              <dt>SMA · 20</dt>
+              <dd id="metric-sma">—</dd>
+              <small>simple moving average</small>
+            </div>
+            <div>
+              <dt>ATR · 14</dt>
+              <dd id="metric-atr">—</dd>
+              <small>average true range</small>
+            </div>
+            <div>
+              <dt>Realized vol · 20</dt>
+              <dd id="metric-volatility">—</dd>
+              <small>annualized</small>
+            </div>
+          </dl>
+        </section>
+
+        <div class="dashboard-grid">
+          <section class="chart-panel panel" aria-labelledby="chart-title">
+            <div class="panel-heading chart-heading">
+              <div>
+                <p class="section-label">Price history</p>
+                <h2 id="chart-title">OHLC tape</h2>
+              </div>
+              <div class="range-control" role="group" aria-label="Chart range">
+                <button type="button" data-range="1D">1D</button>
+                <button type="button" data-range="5D">5D</button>
+                <button class="active" type="button" data-range="1M">1M</button>
+              </div>
+            </div>
+
+            <div class="chart-stage" id="chart-stage">
+              <canvas
+                id="price-chart"
+                role="img"
+                aria-label="USD to GBP candlestick chart"
+              ></canvas>
+              <div class="chart-tooltip" id="chart-tooltip" hidden>
+                <time>—</time>
+                <div><span>O</span><b data-field="open">—</b></div>
+                <div><span>H</span><b data-field="high">—</b></div>
+                <div><span>L</span><b data-field="low">—</b></div>
+                <div><span>C</span><b data-field="close">—</b></div>
+              </div>
+              <div class="chart-empty" id="chart-empty">
+                <div class="empty-candle" aria-hidden="true"></div>
+                <h3>Building the tape</h3>
+                <p>The first OHLC bars will appear after the collector finishes.</p>
+              </div>
+            </div>
+            <div class="chart-legend">
+              <span><i class="legend-up"></i>Close higher</span>
+              <span><i class="legend-down"></i>Close lower</span>
+              <span><i class="legend-sma"></i>SMA 20</span>
+              <span class="chart-as-of">As of <time id="chart-as-of">—</time></span>
+            </div>
+          </section>
+
+          <aside class="collector-panel panel" aria-labelledby="collector-title">
+            <div class="panel-heading">
+              <div>
+                <p class="section-label">Collection path</p>
+                <h2 id="collector-title">Data pulse</h2>
+              </div>
+              <span class="mode-badge" id="mode-badge">—</span>
+            </div>
+
+            <ol class="pipeline" aria-label="Data collection stages">
+              <li data-stage="source">
+                <span class="pipeline-node"><i></i></span>
+                <div>
+                  <small>Source</small>
+                  <strong id="source-name">IB Gateway</strong>
+                  <p id="source-detail">Checking connection target</p>
+                </div>
+              </li>
+              <li data-stage="collector">
+                <span class="pipeline-node"><i></i></span>
+                <div>
+                  <small>Collector</small>
+                  <strong id="collector-state">Waiting</strong>
+                  <p id="collector-detail">No sync recorded</p>
+                </div>
+              </li>
+              <li data-stage="store">
+                <span class="pipeline-node"><i></i></span>
+                <div>
+                  <small>Store</small>
+                  <strong id="stored-bars">— bars</strong>
+                  <p id="database-detail">Reading database</p>
+                </div>
+              </li>
+            </ol>
+
+            <div class="sync-note" id="sync-note" role="status">
+              <span>Next automatic check</span>
+              <strong id="next-sync">—</strong>
+            </div>
+
+            <a class="api-link" href="/docs">
+              <span>Open API reference</span>
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h12m-4-4 4 4-4 4" /></svg>
+            </a>
+          </aside>
+
+          <section class="bars-panel panel" aria-labelledby="bars-title">
+            <div class="panel-heading table-heading">
+              <div>
+                <p class="section-label">Stored observations</p>
+                <h2 id="bars-title">Recent bars</h2>
+              </div>
+              <p id="row-count">0 rows loaded</p>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">UTC time</th>
+                    <th scope="col">Open</th>
+                    <th scope="col">High</th>
+                    <th scope="col">Low</th>
+                    <th scope="col">Close</th>
+                    <th scope="col">WAP</th>
+                    <th scope="col">Volume</th>
+                    <th scope="col">Trades</th>
+                    <th scope="col">Move</th>
+                  </tr>
+                </thead>
+                <tbody id="bars-body">
+                  <tr class="loading-row"><td colspan="9">Reading stored bars…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </main>
+
+      <footer>
+        <p>FX Tape <span>·</span> Collection only—no order routes are implemented.</p>
+        <p id="footer-version">API v0.4</p>
+      </footer>
+    </div>
+
+    <div class="toast-region" aria-live="polite" aria-atomic="true" id="toast-region"></div>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: fx_tape
+      POSTGRES_USER: fx_tape
+      POSTGRES_PASSWORD: fx_tape_local
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fx_tape -d fx_tape"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - fx_tape_postgres:/var/lib/postgresql/data
+
+volumes:
+  fx_tape_postgres:
+
