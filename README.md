@@ -18,8 +18,10 @@ cp .env.example .env
 docker compose up --build -d app
 ```
 
-This starts the API and PostgreSQL in demo mode. Open
-[http://127.0.0.1:8000](http://127.0.0.1:8000), inspect the containers with
+This starts the API and PostgreSQL in demo mode. Adminer is available as an optional database UI;
+start it with `docker compose up -d adminer`. Open
+[http://127.0.0.1:8000](http://127.0.0.1:8000) for the dashboard or
+[http://127.0.0.1:8080](http://127.0.0.1:8080) for Adminer. Inspect the containers with
 `docker compose ps`, or follow API logs with:
 
 ```bash
@@ -119,15 +121,27 @@ production.
 
 ### Adminer database UI
 
-Start Adminer with PostgreSQL:
+Adminer is an optional local-only database browser. Start it with PostgreSQL:
 
 ```bash
 docker compose up -d adminer
 ```
 
-Open [http://127.0.0.1:8080](http://127.0.0.1:8080) and sign in with system `PostgreSQL`, server
-`db`, username `fx_tape`, password `fx_tape_local`, and database `fx_tape`. These values follow the
-`POSTGRES_*` settings in `.env`; the UI port can be changed with `ADMINER_PORT`.
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080) and use:
+
+| Field | Default value |
+| --- | --- |
+| System | `PostgreSQL` |
+| Server | `db` |
+| Username | `fx_tape` |
+| Password | `fx_tape_local` |
+| Database | `fx_tape` |
+
+The username, password, and database follow `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB`
+from `.env`. The server remains `db`, the PostgreSQL service name inside Compose. Set
+`ADMINER_PORT` to change the host port from `8080`; Adminer remains bound to `127.0.0.1` and is not
+exposed on external network interfaces. Stop it with `docker compose stop adminer`, or stop the
+whole stack with `docker compose down`.
 
 ## How collection works
 
