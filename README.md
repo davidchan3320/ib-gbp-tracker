@@ -18,8 +18,8 @@ cp .env.example .env
 docker compose up --build -d app
 ```
 
-This starts the API and PostgreSQL in demo mode. Adminer is available as an optional database UI;
-start it with `docker compose up -d adminer`. Open
+This starts the API, PostgreSQL, and Redis metric cache in demo mode. Adminer is available as an
+optional database UI; start it with `docker compose up -d adminer`. Open
 [http://127.0.0.1:8000](http://127.0.0.1:8000) for the dashboard or
 [http://127.0.0.1:8080](http://127.0.0.1:8080) for Adminer. Inspect the containers with
 `docker compose ps`, or follow API logs with:
@@ -29,7 +29,8 @@ docker compose logs -f app
 ```
 
 Stop the stack with `docker compose down`. The named PostgreSQL volume is retained; running
-`docker compose down -v` also deletes all stored market data.
+`docker compose down -v` also deletes all stored market data. Redis is a disposable cache capped at
+64 MiB with `allkeys-lru`, so it is intentionally empty after the Redis container is recreated.
 
 The image runs as an unprivileged user, has a built-in API health check, and uses a read-only root
 filesystem under Compose. Build it without starting services using `docker compose build app`.
@@ -172,7 +173,8 @@ key is `(price_type, timestamp)`, so one minute can contain independent `bid`, `
 rows without duplicates. A separate timestamp index supports cross-series time-range queries. The
 final three fields are nullable because IB does not provide meaningful centralized volume, WAP, or
 trade count for spot FX bid/ask/midpoint history. Pair, bar size, provider, generated IDs, audit
-timestamps, sync history, and calculated metrics are not persisted.
+timestamps, and sync history are not persisted. Calendar metric results may be stored temporarily
+in the configured SQL or Redis cache described below; bars remain their source of truth.
 
 The separate `backfill_checkpoints` table stores only resumable job state. It advances after a day's
 bars commit, so an interruption can repeat one idempotent upsert but cannot skip a completed chunk.
@@ -252,9 +254,141 @@ to zero against a real Gateway.
 | --- | --- | --- |
 | `GET` | `/healthz` | Process liveness |
 | `GET` | `/api/v1/status` | Collector, provider, database, and latest sync state |
-| `GET` | `/api/v1/bars?price_type=midpoint&limit=1440` | Chronological bars for `bid`, `ask`, or `midpoint` |
+| `GET` | `/api/v1/bars` | Time-range and cursor-paginated `bid`, `ask`, or `midpoint` bars |
 | `GET` | `/api/v1/metrics` | Midpoint price, 24h range/change, SMA 20, ATR 14, realized vol |
+| `GET` | `/api/v1/metrics/daily` | OHLC and two averages for one day or a day range |
+| `GET` | `/api/v1/metrics/monthly` | OHLC and two averages for one month or a month range |
+| `GET` | `/api/v1/metrics/yearly` | OHLC and two averages for one year or a year range |
 | `POST` | `/api/v1/sync` | Run one collection immediately |
+
+Bar ranges are half-open: `start` is inclusive and `end` is exclusive. The first response contains
+the newest bars in the range, ordered chronologically. When `has_more` is true, pass
+`next_cursor` back as `cursor` to retrieve the next older page:
+
+```bash
+curl --get http://127.0.0.1:8000/api/v1/bars \
+  --data-urlencode 'price_type=midpoint' \
+  --data-urlencode 'start=2026-07-01T00:00:00Z' \
+  --data-urlencode 'end=2026-07-28T00:00:00Z' \
+  --data-urlencode 'limit=500'
+
+curl --get http://127.0.0.1:8000/api/v1/bars \
+  --data-urlencode 'price_type=midpoint' \
+  --data-urlencode 'start=2026-07-01T00:00:00Z' \
+  --data-urlencode 'end=2026-07-28T00:00:00Z' \
+  --data-urlencode 'cursor=2026-07-27T15:41:00Z' \
+  --data-urlencode 'limit=500'
+```
+
+`next_cursor` is `null` when no older page remains. Omitting `start` and `end` preserves the default
+behavior of returning the most recent bars. Timestamps without an explicit offset are interpreted
+as UTC.
+
+Request calendar-period metrics with a required day, month, or year and an optional price type
+(default: `midpoint`):
+
+```bash
+curl --get http://127.0.0.1:8000/api/v1/metrics/daily \
+  --data-urlencode 'day=2026-07-27' \
+  --data-urlencode 'price_type=midpoint'
+
+curl --get http://127.0.0.1:8000/api/v1/metrics/monthly \
+  --data-urlencode 'month=2026-07' \
+  --data-urlencode 'price_type=midpoint'
+
+curl --get http://127.0.0.1:8000/api/v1/metrics/yearly \
+  --data-urlencode 'year=2026' \
+  --data-urlencode 'price_type=midpoint'
+```
+
+For a batch response, replace the single-period parameter with inclusive `start` and exclusive
+`end` parameters in the same format:
+
+```bash
+curl --get http://127.0.0.1:8000/api/v1/metrics/daily \
+  --data-urlencode 'start=2026-07-01' \
+  --data-urlencode 'end=2026-08-01' \
+  --data-urlencode 'limit=10'
+
+curl --get http://127.0.0.1:8000/api/v1/metrics/monthly \
+  --data-urlencode 'start=2026-01' \
+  --data-urlencode 'end=2027-01'
+
+curl --get http://127.0.0.1:8000/api/v1/metrics/yearly \
+  --data-urlencode 'start=2020' \
+  --data-urlencode 'end=2027'
+```
+
+The first batch page contains the newest populated periods, ordered chronologically within the page.
+Responses include `has_more` and `next_cursor`; pass `next_cursor` unchanged as the next request's
+exclusive `cursor` to fetch the next older page:
+
+```bash
+curl --get http://127.0.0.1:8000/api/v1/metrics/daily \
+  --data-urlencode 'start=2026-07-01' \
+  --data-urlencode 'end=2026-08-01' \
+  --data-urlencode 'cursor=2026-07-20' \
+  --data-urlencode 'limit=10'
+```
+
+Batch responses also contain the requested `start` and `end`, the current page's `metrics`, and its
+item count in `count`. `limit` defaults to 100 and cannot exceed 1,000. Periods without stored bars
+are omitted; a range with no data returns `200` with an empty `metrics` list. A request must provide
+either the single-period parameter or both range parameters, and cannot mix the two forms. Ranges
+are limited to 10,000 calendar periods per request.
+
+Each request covers the corresponding half-open UTC calendar interval. `open` comes from the first
+stored bar, `close` from the last stored bar, `high` and `low` are the period's extremes, and
+`bar_count` shows how many stored bars contributed. The derived fields are:
+
+```text
+average_open_close = (open + close) / 2
+average_high_low   = (high + low) / 2
+```
+
+Single-period requests return `404` when the selected series has no stored bars for that period.
+Both single and batch requests aggregate in the database on demand.
+
+Calendar metric aggregates and cursor pages support SQLite, PostgreSQL, or Redis cache backends.
+When no backend is configured, the cache uses the application database's SQLite/PostgreSQL type and
+URL. The default TTL is five minutes and can be changed or disabled in `.env`:
+
+```dotenv
+METRICS_CACHE_BACKEND=sqlite
+METRICS_CACHE_URL=sqlite+aiosqlite:///./fx_tape.db
+METRICS_CACHE_TTL_SECONDS=300
+```
+
+PostgreSQL (the `pgsql` alias is also accepted):
+
+```dotenv
+METRICS_CACHE_BACKEND=postgresql
+METRICS_CACHE_URL=postgresql+asyncpg://user:password@localhost/cache_database
+```
+
+Redis:
+
+```dotenv
+METRICS_CACHE_BACKEND=redis
+METRICS_CACHE_URL=redis://localhost:6379/0
+```
+
+Docker Compose includes Redis and selects it by default with
+`METRICS_CACHE_URL=redis://redis:6379/0`. The API and backfill services wait for the Redis health
+check before starting. Override `METRICS_CACHE_BACKEND` and `METRICS_CACHE_URL` to use SQLite or
+PostgreSQL instead; the Redis container remains harmless and disposable when another backend is
+selected.
+
+`METRICS_CACHE_URL` may be omitted when the selected SQL backend matches `DATABASE_URL`; the same
+database and connection settings are then reused. A separate SQLite URL creates only the cache
+table in that file. Set `METRICS_CACHE_TTL_SECONDS=0` to disable cache reads and writes; the maximum
+TTL is 86,400 seconds.
+
+Repeated requests with the same price type, period range, cursor, and limit reuse the cached result.
+Every collector or backfill bar upsert atomically advances the source-data generation and then
+clears existing entries, so a successful data write cannot leave active stale metrics. Generation
+checks remain race-safe even when the cache is in a separate database or Redis. Expired SQL entries
+are cleaned up during writes; Redis entries use native key TTLs.
 
 The checked-in [`openapi.json`](openapi.json) can be imported into API clients and documentation
 tools. Regenerate it after changing routes or schemas:
@@ -272,7 +406,7 @@ require adding those series dimensions to the key.
 Metric calculation is isolated in [`app/services/metrics.py`](app/services/metrics.py). Add a field
 to `MetricSnapshot`, calculate it in `calculate_metrics`, expose it through `MetricsResponse`, and
 render it in the dashboard. Calculators receive chronological OHLC bars and are evaluated on
-demand; metric values are not stored.
+demand; only disposable TTL cache entries are stored, never canonical metric records.
 
 ## Project layout
 

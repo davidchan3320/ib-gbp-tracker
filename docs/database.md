@@ -15,12 +15,14 @@ IB Gateway / demo provider
           ├── collector ───────────────┐
           │                            ▼
           └── backfill CLI ──────> ohlc_bars <──── REST API / metrics
-                    │
-                    └────────────> backfill_checkpoints
+                    │                              │
+                    ├────────────> backfill_checkpoints
+                    │                              ▼
+                    └───────────────> metric cache (SQLite / PostgreSQL / Redis)
 ```
 
-`backfill_checkpoints` is job metadata, not a parent of the bar rows, so there is no foreign key
-between the two tables.
+`backfill_checkpoints` is job metadata and the metric cache contains disposable derived results.
+Neither is a parent of the bar rows, so there are no foreign keys between these stores.
 
 ## `ohlc_bars`
 
@@ -83,6 +85,121 @@ WHERE price_type = 'midpoint'
   AND timestamp <  TIMESTAMPTZ '2026-07-28 00:00:00+00';
 ```
 
+The daily, monthly, and yearly metrics endpoints expose this OHLC calculation for half-open UTC
+calendar periods:
+
+```text
+GET /api/v1/metrics/daily?day=2026-07-27&price_type=midpoint
+GET /api/v1/metrics/monthly?month=2026-07&price_type=midpoint
+GET /api/v1/metrics/yearly?year=2026&price_type=midpoint
+```
+
+Each endpoint also accepts a half-open range for batch aggregation:
+
+```text
+GET /api/v1/metrics/daily?start=2026-07-01&end=2026-08-01
+GET /api/v1/metrics/monthly?start=2026-01&end=2027-01
+GET /api/v1/metrics/yearly?start=2020&end=2027
+```
+
+Batch ranges use keyset pagination. The aggregate query orders populated UTC buckets from newest to
+oldest and reads `limit + 1` buckets to determine `has_more`. The returned page is reversed into
+chronological order. When another page exists, its earliest bucket becomes `next_cursor`; the next
+query applies that cursor as an exclusive upper time bound, avoiding offset scans and duplicate
+boundary buckets.
+
+Each query reads only its requested period through the composite primary-key index. The open is the
+first bar's `open`, the close is the last bar's `close`, and the extremes are `MAX(high)` and
+`MIN(low)`. The result also includes `(open + close) / 2` as `average_open_close` and
+`(high + low) / 2` as `average_high_low`. These values are computed on demand and require no schema
+change or metrics table; the aggregate query does not load every minute bar into application
+memory. Batch queries group the bars into UTC calendar buckets in one query, rank the first and
+last bar within each bucket, and omit buckets without data.
+
+## API time-range pagination
+
+`GET /api/v1/bars` exposes the indexed time-range access path without using offset pagination:
+
+```text
+GET /api/v1/bars
+    ?price_type=midpoint
+    &start=2026-07-01T00:00:00Z
+    &end=2026-07-28T00:00:00Z
+    &limit=500
+```
+
+The range is `[start, end)`. The query reads newest rows first through the composite primary-key
+index, requests `limit + 1` rows to determine whether more exist, and reverses the selected page so
+the returned `bars` array is chronological. A response includes:
+
+```json
+{
+  "start": "2026-07-01T00:00:00Z",
+  "end": "2026-07-28T00:00:00Z",
+  "count": 500,
+  "has_more": true,
+  "next_cursor": "2026-07-27T15:41:00Z",
+  "bars": []
+}
+```
+
+Pass `next_cursor` unchanged as the next request's `cursor`. The cursor is an exclusive upper bound,
+so adjacent pages cannot repeat the boundary row:
+
+```text
+GET /api/v1/bars
+    ?price_type=midpoint
+    &start=2026-07-01T00:00:00Z
+    &end=2026-07-28T00:00:00Z
+    &cursor=2026-07-27T15:41:00Z
+    &limit=500
+```
+
+This remains stable when new bars arrive because later pages always move toward older timestamps.
+Offset pagination is intentionally not used because large offsets become increasingly expensive and
+can shift when concurrent inserts occur.
+
+## Metric cache
+
+The cache stores JSON summaries for single calendar periods and cursor-paginated batch pages. The
+cache key covers price type, UTC query bounds, period level, and page limit. SQL backends use the
+`metric_cache` table; Redis uses `fx_tape:metrics:*` keys with native TTLs. `metric_cache_state`
+always remains in the source bar database and contains the current source-data generation:
+
+| Table / column | PostgreSQL type | Purpose |
+| --- | --- | --- |
+| `metric_cache.cache_key` | `TEXT` | Primary key for the normalized aggregate query |
+| `metric_cache.generation` | `BIGINT` | Bar generation used to calculate the payload |
+| `metric_cache.payload` | `TEXT` | Compact JSON summary or page |
+| `metric_cache.created_at` | `TIMESTAMPTZ` | Time the result was calculated |
+| `metric_cache.expires_at` | `TIMESTAMPTZ` | TTL boundary; indexed for cleanup |
+| `metric_cache_state.id` | `INTEGER` | Singleton key (`1`) |
+| `metric_cache_state.generation` | `BIGINT` | Current bar-data generation |
+
+Cache lookup requires both a matching source generation and an unexpired backend entry. Bar upserts
+advance the singleton generation in the same transaction as the OHLC writes, then clear the chosen
+backend. The generation check protects against a concurrent request inserting an old calculation
+after that clear: the old entry can exist, but no later request will use it.
+
+Configuration accepts `sqlite`, `postgresql` (`pgsql` alias), or `redis`:
+
+```dotenv
+METRICS_CACHE_BACKEND=sqlite
+METRICS_CACHE_URL=sqlite+aiosqlite:///./fx_tape_cache.db
+METRICS_CACHE_TTL_SECONDS=300
+```
+
+If the backend is omitted, it follows `DATABASE_URL`. `METRICS_CACHE_URL` can be omitted when a SQL
+cache uses the same backend as the source database; otherwise it selects a separate SQLite or
+PostgreSQL database. Redis URLs use `redis://` or `rediss://`. A zero TTL bypasses all cache reads
+and writes. SQL cache writes opportunistically remove expired rows, while Redis enforces expiration
+natively.
+
+Docker Compose provisions a `redis:8-alpine` service, waits for `redis-cli ping`, and defaults the
+containers to `METRICS_CACHE_BACKEND=redis` with `redis://redis:6379/0`. Redis is capped at 64 MiB
+with `allkeys-lru`, persistence is disabled, and `/data` is a disposable `tmpfs`. Evicted or
+restart-cleared results are recalculated from `ohlc_bars`.
+
 ## `backfill_checkpoints`
 
 This table contains the durable cursor and progress for each provider/pair/start-date job.
@@ -123,12 +240,13 @@ CREATE TABLE backfill_checkpoints (
 The project does not currently use Alembic or a schema-version table. `Database.create_schema()` is
 called at API startup and before CLI backfill commands. It performs these transactional steps:
 
-1. Create both tables when `ohlc_bars` does not exist.
+1. Create all model tables when `ohlc_bars` does not exist.
 2. If a legacy table has no `price_type`, create `ohlc_bars_v2`, copy old observations as
    `midpoint`, replace the old table, and establish the composite primary key.
 3. Add `volume`, `weighted_average_price`, or `trade_count` when missing.
 4. Add the timestamp index when missing.
-5. Create any missing model tables, including `backfill_checkpoints`.
+5. Create any missing model tables, including the cache and `backfill_checkpoints` tables.
+6. Ensure the singleton `metric_cache_state` generation row exists.
 
 This startup migration is sufficient for the schema changes currently implemented, but
 `create_all()` does not modify arbitrary existing columns or constraints. Before production schema

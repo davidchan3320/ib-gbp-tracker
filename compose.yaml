@@ -6,6 +6,8 @@ x-fx-tape: &fx-tape
   depends_on:
     db:
       condition: service_healthy
+    redis:
+      condition: service_healthy
   environment: &fx-tape-environment
     DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-fx_tape}:${POSTGRES_PASSWORD:-fx_tape_local}@db:5432/${POSTGRES_DB:-fx_tape}
     DATA_PROVIDER: ${DATA_PROVIDER:-demo}
@@ -20,6 +22,9 @@ x-fx-tape: &fx-tape
     SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-60}
     SYNC_ON_STARTUP: ${SYNC_ON_STARTUP:-true}
     SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+    METRICS_CACHE_BACKEND: ${METRICS_CACHE_BACKEND:-redis}
+    METRICS_CACHE_URL: ${METRICS_CACHE_URL:-redis://redis:6379/0}
+    METRICS_CACHE_TTL_SECONDS: ${METRICS_CACHE_TTL_SECONDS:-300}
     BACKFILL_START: ${BACKFILL_START:-2017-01-01}
     BACKFILL_REQUEST_DELAY_SECONDS: ${BACKFILL_REQUEST_DELAY_SECONDS:-10}
     BACKFILL_MAX_RETRIES: ${BACKFILL_MAX_RETRIES:-3}
@@ -73,6 +78,36 @@ services:
       start_period: 5s
     volumes:
       - fx_tape_postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - allkeys-lru
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /data:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   adminer:

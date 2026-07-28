@@ -17,6 +17,7 @@ from app.config import Settings
 from app.db import Database
 from app.providers import build_provider
 from app.services.backfill import BackfillManager, BackfillState
+from app.services.cache import build_metric_cache
 from app.services.repository import BarRepository
 
 
@@ -169,8 +170,13 @@ async def run_backfill(
 ) -> int:
     runtime_settings = _backfill_settings(settings)
     database = Database(runtime_settings.database_url)
+    metric_cache = build_metric_cache(runtime_settings, database.session_factory)
     provider = build_provider(runtime_settings)
-    repository = BarRepository(database.session_factory)
+    repository = BarRepository(
+        database.session_factory,
+        metric_cache=metric_cache,
+        cache_ttl_seconds=runtime_settings.metrics_cache_ttl_seconds,
+    )
     manager = BackfillManager(
         settings=runtime_settings,
         provider=provider,
@@ -181,6 +187,7 @@ async def run_backfill(
 
     try:
         await database.create_schema()
+        await metric_cache.initialize()
         await run_lock.acquire()
         await manager.initialize()
         state = await manager.start(restart=restart)
@@ -210,6 +217,7 @@ async def run_backfill(
             await manager.stop()
         await provider.close()
         await run_lock.release()
+        await metric_cache.close()
         await database.dispose()
 
 

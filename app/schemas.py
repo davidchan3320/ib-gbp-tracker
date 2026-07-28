@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -15,6 +15,9 @@ class UTCDateTimeModel(BaseModel):
         "started_at",
         "completed_at",
         "updated_at",
+        "start",
+        "end",
+        "next_cursor",
         check_fields=False,
     )
     @classmethod
@@ -38,11 +41,15 @@ class BarResponse(UTCDateTimeModel):
     trade_count: int | None
 
 
-class BarsEnvelope(BaseModel):
+class BarsEnvelope(UTCDateTimeModel):
     pair: str
     bar_size: str
     price_type: PriceType
+    start: datetime | None
+    end: datetime | None
     count: int
+    has_more: bool
+    next_cursor: datetime | None
     bars: list[BarResponse]
 
 
@@ -58,6 +65,71 @@ class MetricsResponse(UTCDateTimeModel):
     sma_20: float | None
     atr_14: float | None
     realized_volatility_20_pct: float | None
+
+
+class PeriodMetricsResponse(BaseModel):
+    pair: str
+    bar_size: str
+    price_type: PriceType
+    timezone: str
+    bar_count: int
+    open: float
+    close: float
+    high: float
+    low: float
+    average_open_close: float
+    average_high_low: float
+
+
+class DailyMetricsResponse(PeriodMetricsResponse):
+    day: date
+
+
+class MonthlyMetricsResponse(PeriodMetricsResponse):
+    month: str
+
+
+class YearlyMetricsResponse(PeriodMetricsResponse):
+    year: int
+
+
+class DailyMetricsBatchResponse(BaseModel):
+    pair: str
+    bar_size: str
+    price_type: PriceType
+    timezone: str
+    start: date
+    end: date
+    count: int
+    has_more: bool
+    next_cursor: date | None
+    metrics: list[DailyMetricsResponse]
+
+
+class MonthlyMetricsBatchResponse(BaseModel):
+    pair: str
+    bar_size: str
+    price_type: PriceType
+    timezone: str
+    start: str
+    end: str
+    count: int
+    has_more: bool
+    next_cursor: str | None
+    metrics: list[MonthlyMetricsResponse]
+
+
+class YearlyMetricsBatchResponse(BaseModel):
+    pair: str
+    bar_size: str
+    price_type: PriceType
+    timezone: str
+    start: int
+    end: int
+    count: int
+    has_more: bool
+    next_cursor: int | None
+    metrics: list[YearlyMetricsResponse]
 
 
 class SyncRunResponse(UTCDateTimeModel):
@@ -82,6 +154,8 @@ class StatusResponse(BaseModel):
     database: str
     scheduler_enabled: bool
     sync_interval_seconds: int
+    metrics_cache_backend: str
+    metrics_cache_ttl_seconds: int
     collector_running: bool
     stored_bars: int
     gateway_host: str | None

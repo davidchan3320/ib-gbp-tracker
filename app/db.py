@@ -64,6 +64,7 @@ class Database:
             )
             if "ohlc_bars" not in tables:
                 await connection.run_sync(Base.metadata.create_all)
+                await self._initialize_metric_cache_state(connection)
                 return
 
             columns = await self._bar_columns(connection)
@@ -85,6 +86,16 @@ class Database:
                     text("CREATE INDEX ix_ohlc_bars_timestamp ON ohlc_bars (timestamp)")
                 )
             await connection.run_sync(Base.metadata.create_all)
+            await self._initialize_metric_cache_state(connection)
+
+    @staticmethod
+    async def _initialize_metric_cache_state(connection) -> None:
+        await connection.execute(
+            text(
+                "INSERT INTO metric_cache_state (id, generation) VALUES (1, 0) "
+                "ON CONFLICT (id) DO NOTHING"
+            )
+        )
 
     @staticmethod
     async def _bar_columns(connection) -> set[str]:

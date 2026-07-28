@@ -27,6 +27,54 @@ class MetricSnapshot:
     realized_volatility_20_pct: float | None
 
 
+@dataclass(frozen=True, slots=True)
+class PeriodMetricSnapshot:
+    open: float
+    close: float
+    high: float
+    low: float
+    average_open_close: float
+    average_high_low: float
+
+
+def calculate_period_metrics(
+    *,
+    open_price: float,
+    close_price: float,
+    high_price: float,
+    low_price: float,
+) -> PeriodMetricSnapshot:
+    """Calculate derived values shared by daily, monthly, and yearly OHLC metrics."""
+    return PeriodMetricSnapshot(
+        open=open_price,
+        close=close_price,
+        high=high_price,
+        low=low_price,
+        average_open_close=(open_price + close_price) / 2,
+        average_high_low=(high_price + low_price) / 2,
+    )
+
+
+def calculate_daily_metrics(bars: list[OHLCBar]) -> PeriodMetricSnapshot | None:
+    """Calculate OHLC and midpoint-of-extremes values for one calendar day."""
+    if not bars:
+        return None
+
+    first_bar = min(bars, key=lambda bar: bar.timestamp)
+    last_bar = max(bars, key=lambda bar: bar.timestamp)
+    daily_open = float(first_bar.open)
+    daily_close = float(last_bar.close)
+    daily_high = max(float(bar.high) for bar in bars)
+    daily_low = min(float(bar.low) for bar in bars)
+
+    return calculate_period_metrics(
+        open_price=daily_open,
+        close_price=daily_close,
+        high_price=daily_high,
+        low_price=daily_low,
+    )
+
+
 def calculate_metrics(bars: list[OHLCBar], bar_size: str) -> MetricSnapshot | None:
     """Calculate a compact metric set. Add calculators here as the product grows."""
     if not bars:

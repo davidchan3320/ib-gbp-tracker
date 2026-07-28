@@ -2,7 +2,9 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
@@ -15,25 +17,56 @@ from app.providers import build_provider
 from app.schemas import (
     BarResponse,
     BarsEnvelope,
+    DailyMetricsBatchResponse,
+    DailyMetricsResponse,
     ErrorResponse,
     MetricsResponse,
+    MonthlyMetricsBatchResponse,
+    MonthlyMetricsResponse,
     StatusResponse,
     SyncResponse,
     SyncRunResponse,
+    YearlyMetricsBatchResponse,
+    YearlyMetricsResponse,
 )
+from app.services.cache import build_metric_cache
 from app.services.collector import Collector, SyncAlreadyRunningError
-from app.services.metrics import calculate_metrics
-from app.services.repository import BarRepository
+from app.services.metrics import calculate_metrics, calculate_period_metrics
+from app.services.repository import BarPeriodSummary, BarRepository, as_utc
 from app.services.scheduler import CollectorScheduler
 
 STATIC_DIR = Path(__file__).parent / "static"
+MAX_METRIC_BATCH_PERIODS = 10_000
+
+
+def _parse_month(value: str, parameter_name: str) -> datetime:
+    try:
+        return datetime.strptime(value, "%Y-%m").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"'{parameter_name}' must be a valid calendar month in YYYY-MM format",
+        ) from exc
+
+
+def _next_month(value: datetime) -> datetime:
+    if value.month == 12:
+        return value.replace(year=value.year + 1, month=1)
+    return value.replace(month=value.month + 1)
+
+
 logger = logging.getLogger("uvicorn.error")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     runtime_settings = settings or get_settings()
     database = Database(runtime_settings.database_url)
-    repository = BarRepository(database.session_factory)
+    metric_cache = build_metric_cache(runtime_settings, database.session_factory)
+    repository = BarRepository(
+        database.session_factory,
+        metric_cache=metric_cache,
+        cache_ttl_seconds=runtime_settings.metrics_cache_ttl_seconds,
+    )
     provider = build_provider(runtime_settings)
     collector = Collector(
         settings=runtime_settings,
@@ -52,41 +85,522 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             database_url,
         )
         try:
+            await metric_cache.initialize()
             if runtime_settings.scheduler_enabled:
                 scheduler.start(run_immediately=runtime_settings.sync_on_startup)
             yield
         finally:
             await scheduler.stop()
             await provider.close()
+            await metric_cache.close()
             await database.dispose()
 
     app = FastAPI(
         title="FX Tape API",
-        version="0.4.0",
+        version="0.6.0",
         description="Collect and inspect one-minute GBP/USD bid, ask, and midpoint OHLC bars.",
         lifespan=lifespan,
     )
     app.state.settings = runtime_settings
     app.state.database = database
+    app.state.metric_cache = metric_cache
     app.state.repository = repository
     app.state.collector = collector
+
+    def period_metric_fields(summary: BarPeriodSummary) -> dict[str, int | float]:
+        snapshot = calculate_period_metrics(
+            open_price=summary.open,
+            close_price=summary.close,
+            high_price=summary.high,
+            low_price=summary.low,
+        )
+        return {"bar_count": summary.bar_count, **asdict(snapshot)}
+
+    def daily_metrics_response(
+        summary: BarPeriodSummary,
+        period_day: date,
+        price_type: PriceType,
+    ) -> DailyMetricsResponse:
+        return DailyMetricsResponse(
+            pair=runtime_settings.display_pair,
+            bar_size=runtime_settings.bar_size,
+            price_type=price_type,
+            day=period_day,
+            timezone="UTC",
+            **period_metric_fields(summary),
+        )
+
+    def monthly_metrics_response(
+        summary: BarPeriodSummary,
+        period_month: str,
+        price_type: PriceType,
+    ) -> MonthlyMetricsResponse:
+        return MonthlyMetricsResponse(
+            pair=runtime_settings.display_pair,
+            bar_size=runtime_settings.bar_size,
+            price_type=price_type,
+            month=period_month,
+            timezone="UTC",
+            **period_metric_fields(summary),
+        )
+
+    def yearly_metrics_response(
+        summary: BarPeriodSummary,
+        period_year: int,
+        price_type: PriceType,
+    ) -> YearlyMetricsResponse:
+        return YearlyMetricsResponse(
+            pair=runtime_settings.display_pair,
+            bar_size=runtime_settings.bar_size,
+            price_type=price_type,
+            year=period_year,
+            timezone="UTC",
+            **period_metric_fields(summary),
+        )
 
     @app.get("/healthz", tags=["system"])
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/api/v1/bars", response_model=BarsEnvelope, tags=["market data"])
+    @app.get(
+        "/api/v1/bars",
+        response_model=BarsEnvelope,
+        summary="List paginated historical bars",
+        description=(
+            "Returns bars chronologically within each page. The first page contains the newest "
+            "bars in the half-open `[start, end)` range. Pass `next_cursor` back as `cursor` to "
+            "request the next older page."
+        ),
+        tags=["market data"],
+    )
     async def get_bars(
         price_type: PriceType = PriceType.MIDPOINT,
-        limit: int = Query(default=1_440, ge=1, le=10_000),
+        start: Annotated[
+            datetime | None,
+            Query(
+                description=(
+                    "Inclusive UTC range start. A timezone-free value is interpreted as UTC."
+                )
+            ),
+        ] = None,
+        end: Annotated[
+            datetime | None,
+            Query(
+                description=(
+                    "Exclusive UTC range end. A timezone-free value is interpreted as UTC."
+                )
+            ),
+        ] = None,
+        cursor: Annotated[
+            datetime | None,
+            Query(
+                description=(
+                    "Exclusive upper-bound cursor returned as `next_cursor` by the prior page."
+                )
+            ),
+        ] = None,
+        limit: Annotated[
+            int,
+            Query(
+                ge=1,
+                le=10_000,
+                description="Maximum number of bars returned in one page.",
+            ),
+        ] = 1_440,
     ) -> BarsEnvelope:
-        rows = await repository.list_bars(price_type=price_type, limit=limit)
+        range_start = as_utc(start) if start is not None else None
+        range_end = as_utc(end) if end is not None else None
+        page_cursor = as_utc(cursor) if cursor is not None else None
+        if range_start is not None and range_end is not None and range_start >= range_end:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'start' must be earlier than 'end'",
+            )
+        if page_cursor is not None and range_start is not None and page_cursor <= range_start:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'cursor' must be later than 'start'",
+            )
+        if page_cursor is not None and range_end is not None and page_cursor > range_end:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'cursor' cannot be later than 'end'",
+            )
+
+        rows, has_more = await repository.page_bars(
+            price_type=price_type,
+            limit=limit,
+            start=range_start,
+            end=range_end,
+            before=page_cursor,
+        )
         return BarsEnvelope(
             pair=runtime_settings.display_pair,
             bar_size=runtime_settings.bar_size,
             price_type=price_type,
+            start=range_start,
+            end=range_end,
             count=len(rows),
+            has_more=has_more,
+            next_cursor=rows[0].timestamp if has_more and rows else None,
             bars=[BarResponse.model_validate(row) for row in rows],
+        )
+
+    @app.get(
+        "/api/v1/metrics/daily",
+        response_model=DailyMetricsResponse | DailyMetricsBatchResponse,
+        responses={404: {"model": ErrorResponse}},
+        summary="Calculate metrics for one or more UTC calendar days",
+        description=(
+            "Pass `day` for one day, or pass both `start` and `end` for a half-open batch range. "
+            "`average_open_close` is `(open + close) / 2`; `average_high_low` is "
+            "`(high + low) / 2`."
+        ),
+        tags=["metrics"],
+    )
+    async def get_daily_metrics(
+        day: Annotated[
+            date | None,
+            Query(description="Single UTC calendar day in `YYYY-MM-DD` format."),
+        ] = None,
+        start: Annotated[
+            date | None,
+            Query(description="Inclusive first UTC day in a batch range."),
+        ] = None,
+        end: Annotated[
+            date | None,
+            Query(description="Exclusive last UTC day in a batch range."),
+        ] = None,
+        cursor: Annotated[
+            date | None,
+            Query(description="Exclusive upper-bound day returned by the previous batch page."),
+        ] = None,
+        limit: Annotated[
+            int,
+            Query(ge=1, le=1_000, description="Maximum periods returned in one batch page."),
+        ] = 100,
+        price_type: PriceType = PriceType.MIDPOINT,
+    ) -> DailyMetricsResponse | DailyMetricsBatchResponse:
+        if day is not None:
+            if start is not None or end is not None or cursor is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="'day' cannot be combined with 'start', 'end', or 'cursor'",
+                )
+            if day == date.max:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="'day' must be earlier than 9999-12-31",
+                )
+            day_start = datetime.combine(day, time.min, tzinfo=UTC)
+            day_end = day_start + timedelta(days=1)
+            summary = await repository.summarize_bars(
+                price_type=price_type,
+                start=day_start,
+                end=day_end,
+            )
+            if summary is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"No {price_type.value} bars stored for {day.isoformat()} UTC.",
+                )
+            return daily_metrics_response(summary, day, price_type)
+
+        if start is None or end is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Provide either 'day' or both 'start' and 'end'",
+            )
+        if start >= end:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'start' must be earlier than 'end'",
+            )
+        if (end - start).days > MAX_METRIC_BATCH_PERIODS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"Daily ranges cannot exceed {MAX_METRIC_BATCH_PERIODS} periods",
+            )
+        if cursor is not None and cursor <= start:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'cursor' must be later than 'start'",
+            )
+        if cursor is not None and cursor > end:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'cursor' cannot be later than 'end'",
+            )
+
+        summaries, has_more = await repository.summarize_bars_by_period(
+            price_type=price_type,
+            start=datetime.combine(start, time.min, tzinfo=UTC),
+            end=datetime.combine(cursor or end, time.min, tzinfo=UTC),
+            period="day",
+            limit=limit,
+        )
+        metrics = [
+            daily_metrics_response(summary, summary.period_start.date(), price_type)
+            for summary in summaries
+            if summary.period_start is not None
+        ]
+        return DailyMetricsBatchResponse(
+            pair=runtime_settings.display_pair,
+            bar_size=runtime_settings.bar_size,
+            price_type=price_type,
+            timezone="UTC",
+            start=start,
+            end=end,
+            count=len(metrics),
+            has_more=has_more,
+            next_cursor=metrics[0].day if has_more and metrics else None,
+            metrics=metrics,
+        )
+
+    @app.get(
+        "/api/v1/metrics/monthly",
+        response_model=MonthlyMetricsResponse | MonthlyMetricsBatchResponse,
+        responses={404: {"model": ErrorResponse}},
+        summary="Calculate metrics for one or more UTC calendar months",
+        description=(
+            "Pass `month` for one month, or pass both `start` and `end` for a half-open batch "
+            "range. "
+            "`average_open_close` is `(open + close) / 2`; `average_high_low` is "
+            "`(high + low) / 2`."
+        ),
+        tags=["metrics"],
+    )
+    async def get_monthly_metrics(
+        month: Annotated[
+            str | None,
+            Query(
+                pattern=r"^\d{4}-(0[1-9]|1[0-2])$",
+                description="Single UTC calendar month in `YYYY-MM` format.",
+            ),
+        ] = None,
+        start: Annotated[
+            str | None,
+            Query(
+                pattern=r"^\d{4}-(0[1-9]|1[0-2])$",
+                description="Inclusive first UTC month in a batch range.",
+            ),
+        ] = None,
+        end: Annotated[
+            str | None,
+            Query(
+                pattern=r"^\d{4}-(0[1-9]|1[0-2])$",
+                description="Exclusive last UTC month in a batch range.",
+            ),
+        ] = None,
+        cursor: Annotated[
+            str | None,
+            Query(
+                pattern=r"^\d{4}-(0[1-9]|1[0-2])$",
+                description="Exclusive upper-bound month returned by the previous batch page.",
+            ),
+        ] = None,
+        limit: Annotated[
+            int,
+            Query(ge=1, le=1_000, description="Maximum periods returned in one batch page."),
+        ] = 100,
+        price_type: PriceType = PriceType.MIDPOINT,
+    ) -> MonthlyMetricsResponse | MonthlyMetricsBatchResponse:
+        if month is not None:
+            if start is not None or end is not None or cursor is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="'month' cannot be combined with 'start', 'end', or 'cursor'",
+                )
+            month_start = _parse_month(month, "month")
+            if month_start.year == 9999 and month_start.month == 12:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="'month' must be earlier than 9999-12",
+                )
+            summary = await repository.summarize_bars(
+                price_type=price_type,
+                start=month_start,
+                end=_next_month(month_start),
+            )
+            if summary is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"No {price_type.value} bars stored for {month} UTC.",
+                )
+            return monthly_metrics_response(summary, month, price_type)
+
+        if start is None or end is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Provide either 'month' or both 'start' and 'end'",
+            )
+        range_start = _parse_month(start, "start")
+        range_end = _parse_month(end, "end")
+        if range_start >= range_end:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'start' must be earlier than 'end'",
+            )
+        month_count = (range_end.year - range_start.year) * 12 + (
+            range_end.month - range_start.month
+        )
+        if month_count > MAX_METRIC_BATCH_PERIODS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"Monthly ranges cannot exceed {MAX_METRIC_BATCH_PERIODS} periods",
+            )
+        range_cursor = _parse_month(cursor, "cursor") if cursor is not None else None
+        if range_cursor is not None and range_cursor <= range_start:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'cursor' must be later than 'start'",
+            )
+        if range_cursor is not None and range_cursor > range_end:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'cursor' cannot be later than 'end'",
+            )
+
+        summaries, has_more = await repository.summarize_bars_by_period(
+            price_type=price_type,
+            start=range_start,
+            end=range_cursor or range_end,
+            period="month",
+            limit=limit,
+        )
+        metrics = [
+            monthly_metrics_response(
+                summary,
+                summary.period_start.strftime("%Y-%m"),
+                price_type,
+            )
+            for summary in summaries
+            if summary.period_start is not None
+        ]
+        return MonthlyMetricsBatchResponse(
+            pair=runtime_settings.display_pair,
+            bar_size=runtime_settings.bar_size,
+            price_type=price_type,
+            timezone="UTC",
+            start=start,
+            end=end,
+            count=len(metrics),
+            has_more=has_more,
+            next_cursor=metrics[0].month if has_more and metrics else None,
+            metrics=metrics,
+        )
+
+    @app.get(
+        "/api/v1/metrics/yearly",
+        response_model=YearlyMetricsResponse | YearlyMetricsBatchResponse,
+        responses={404: {"model": ErrorResponse}},
+        summary="Calculate metrics for one or more UTC calendar years",
+        description=(
+            "Pass `year` for one year, or pass both `start` and `end` for a half-open batch range. "
+            "`average_open_close` is `(open + close) / 2`; `average_high_low` is "
+            "`(high + low) / 2`."
+        ),
+        tags=["metrics"],
+    )
+    async def get_yearly_metrics(
+        year: Annotated[
+            int | None,
+            Query(ge=1, le=9999, description="Single UTC calendar year."),
+        ] = None,
+        start: Annotated[
+            int | None,
+            Query(ge=1, le=9999, description="Inclusive first UTC year in a batch range."),
+        ] = None,
+        end: Annotated[
+            int | None,
+            Query(ge=1, le=9999, description="Exclusive last UTC year in a batch range."),
+        ] = None,
+        cursor: Annotated[
+            int | None,
+            Query(
+                ge=1,
+                le=9999,
+                description="Exclusive upper-bound year returned by the previous batch page.",
+            ),
+        ] = None,
+        limit: Annotated[
+            int,
+            Query(ge=1, le=1_000, description="Maximum periods returned in one batch page."),
+        ] = 100,
+        price_type: PriceType = PriceType.MIDPOINT,
+    ) -> YearlyMetricsResponse | YearlyMetricsBatchResponse:
+        if year is not None:
+            if start is not None or end is not None or cursor is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="'year' cannot be combined with 'start', 'end', or 'cursor'",
+                )
+            if year == 9999:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="'year' must be earlier than 9999",
+                )
+            summary = await repository.summarize_bars(
+                price_type=price_type,
+                start=datetime(year, 1, 1, tzinfo=UTC),
+                end=datetime(year + 1, 1, 1, tzinfo=UTC),
+            )
+            if summary is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"No {price_type.value} bars stored for {year} UTC.",
+                )
+            return yearly_metrics_response(summary, year, price_type)
+
+        if start is None or end is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Provide either 'year' or both 'start' and 'end'",
+            )
+        if start >= end:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'start' must be earlier than 'end'",
+            )
+        if end - start > MAX_METRIC_BATCH_PERIODS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"Yearly ranges cannot exceed {MAX_METRIC_BATCH_PERIODS} periods",
+            )
+        if cursor is not None and cursor <= start:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'cursor' must be later than 'start'",
+            )
+        if cursor is not None and cursor > end:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'cursor' cannot be later than 'end'",
+            )
+
+        summaries, has_more = await repository.summarize_bars_by_period(
+            price_type=price_type,
+            start=datetime(start, 1, 1, tzinfo=UTC),
+            end=datetime(cursor or end, 1, 1, tzinfo=UTC),
+            period="year",
+            limit=limit,
+        )
+        metrics = [
+            yearly_metrics_response(summary, summary.period_start.year, price_type)
+            for summary in summaries
+            if summary.period_start is not None
+        ]
+        return YearlyMetricsBatchResponse(
+            pair=runtime_settings.display_pair,
+            bar_size=runtime_settings.bar_size,
+            price_type=price_type,
+            timezone="UTC",
+            start=start,
+            end=end,
+            count=len(metrics),
+            has_more=has_more,
+            next_cursor=metrics[0].year if has_more and metrics else None,
+            metrics=metrics,
         )
 
     @app.get(
@@ -124,6 +638,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             database=runtime_settings.database_backend,
             scheduler_enabled=runtime_settings.scheduler_enabled,
             sync_interval_seconds=runtime_settings.sync_interval_seconds,
+            metrics_cache_backend=metric_cache.name,
+            metrics_cache_ttl_seconds=runtime_settings.metrics_cache_ttl_seconds,
             collector_running=collector.is_running,
             stored_bars=stored_bars,
             gateway_host=runtime_settings.ib_host if provider.name == "ib" else None,

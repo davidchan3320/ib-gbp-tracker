@@ -58,3 +58,21 @@ class BackfillCheckpoint(Base):
     bars_received: Mapped[int] = mapped_column(BigInteger, nullable=False)
     bars_written: Mapped[int] = mapped_column(BigInteger, nullable=False)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MetricCacheState(Base):
+    __tablename__ = "metric_cache_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+
+
+class MetricCache(Base):
+    __tablename__ = "metric_cache"
+    __table_args__ = (Index("ix_metric_cache_expires_at", "expires_at"),)
+
+    cache_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
