@@ -10,6 +10,26 @@ The app starts in **demo mode**, so the entire collector, database, chart, and m
 evaluated without an IB account. Switching one environment variable activates the real IB
 Gateway provider.
 
+## Agent skill set
+
+For agent-assisted follow-up work, load the project-local [`ib-gbp-tracker`](SKILL.md) skill first.
+It records the current architecture, data semantics, IB pacing assumptions, persistence rules, and
+required verification workflow. The following supporting skills are useful when available in the
+agent environment:
+
+| Skill | Project use |
+| --- | --- |
+| `ib-gbp-tracker` | Start here for every repository change, investigation, or handoff. |
+| `postgresql-table-design` | Review table keys, data types, indexes, constraints, and migrations. |
+| `postgresql-optimization` | Analyze query plans, aggregation performance, and database storage. |
+| `multi-stage-dockerfile` | Change or review the production Docker build. |
+| `frontend-design` | Improve the dependency-free dashboard layout and visual design. |
+| `browser:control-in-app-browser` | Exercise and visually verify the local dashboard and API flows. |
+| `skill-creator` | Maintain or extend the project-local `SKILL.md`. |
+
+Supporting skills depend on the agent installation. If one is unavailable, follow `SKILL.md`, the
+repository documentation, and the existing test suite directly.
+
 ## Docker quick start
 
 Requirements: Docker Engine with the Compose plugin.
@@ -294,6 +314,7 @@ to zero against a real Gateway.
 | `GET` | `/healthz` | Process liveness |
 | `GET` | `/api/v1/status` | Collector, database, cache backend, and latest sync state |
 | `GET` | `/api/v1/bars` | Time-range and cursor-paginated `bid`, `ask`, or `midpoint` bars |
+| `GET` | `/api/v1/ib/daily` | Fetch one daily OHLC bar directly from IB Gateway |
 | `GET` | `/api/v1/metrics` | Midpoint price, 24h range/change, SMA 20, ATR 14, realized vol |
 | `GET` | `/api/v1/metrics/daily` | OHLC and two averages for one day or a day range |
 | `GET` | `/api/v1/metrics/monthly` | OHLC and two averages for one month or a month range |
@@ -322,6 +343,19 @@ curl --get http://127.0.0.1:8000/api/v1/bars \
 `next_cursor` is `null` when no older page remains. Omitting `start` and `end` preserves the default
 behavior of returning the most recent bars. Timestamps without an explicit offset are interpreted
 as UTC.
+
+Fetch one daily bar directly from IB Gateway without reading or writing the application database:
+
+```bash
+curl --get http://127.0.0.1:8000/api/v1/ib/daily \
+  --data-urlencode 'day=2026-07-27' \
+  --data-urlencode 'price_type=midpoint'
+```
+
+This endpoint requires `DATA_PROVIDER=ib`. It makes one IB historical-data request with a `1 day`
+bar size and returns `open`, `close`, `high`, and `low` for the matching IB session date. Choose
+`bid`, `ask`, or `midpoint` with `price_type`; the default is `midpoint`. A market holiday or other
+date for which IB returns no matching session bar produces `404`.
 
 Request calendar-period metrics with a required day, month, or year and an optional price type
 (default: `midpoint`):

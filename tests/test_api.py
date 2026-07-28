@@ -1,13 +1,16 @@
 import logging
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.domain import PriceType
 from app.main import create_app
+from app.providers.base import PriceBar
 
 
 def test_startup_logs_database_connection_without_password(caplog, monkeypatch) -> None:
@@ -226,6 +229,67 @@ def test_dashboard_and_health_are_served(tmp_path: Path) -> None:
         page = client.get("/")
         assert page.status_code == 200
         assert "FX Tape" in page.text
+
+
+def test_direct_ib_daily_bar_returns_gateway_ohlc(tmp_path: Path, monkeypatch) -> None:
+    settings = Settings(
+        data_provider="ib",
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'ib-daily.db'}",
+        scheduler_enabled=False,
+    )
+    app = create_app(settings)
+    requested = {}
+
+    async def fetch_daily_bar(*, pair, day, price_type):
+        requested.update(pair=pair, day=day, price_type=price_type)
+        return PriceBar(
+            price_type=price_type,
+            timestamp=datetime(2026, 7, 27, tzinfo=UTC),
+            open=Decimal("1.3100"),
+            close=Decimal("1.3300"),
+            high=Decimal("1.3400"),
+            low=Decimal("1.3000"),
+        )
+
+    monkeypatch.setattr(app.state.provider, "fetch_daily_bar", fetch_daily_bar)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/ib/daily",
+            params={"day": "2026-07-27", "price_type": "bid"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "provider": "ib",
+        "pair": "GBP/USD",
+        "bar_size": "1 day",
+        "price_type": "bid",
+        "day": "2026-07-27",
+        "open": 1.31,
+        "close": 1.33,
+        "high": 1.34,
+        "low": 1.3,
+    }
+    assert requested == {
+        "pair": "GBPUSD",
+        "day": date(2026, 7, 27),
+        "price_type": PriceType.BID,
+    }
+
+
+def test_direct_ib_daily_bar_requires_ib_provider(tmp_path: Path) -> None:
+    settings = Settings(
+        data_provider="demo",
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'demo-daily.db'}",
+        scheduler_enabled=False,
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/v1/ib/daily", params={"day": "2026-07-27"})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Direct IB data requires DATA_PROVIDER=ib."}
 
 
 def test_metric_api_database_cache_hits_and_invalidates_on_sync(tmp_path: Path) -> None:

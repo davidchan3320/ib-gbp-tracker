@@ -85,6 +85,18 @@ class DailyMetricsResponse(PeriodMetricsResponse):
     day: date
 
 
+class IBDailyBarResponse(BaseModel):
+    provider: str
+    pair: str
+    bar_size: str
+    price_type: PriceType
+    day: date
+    open: float
+    close: float
+    high: float
+    low: float
+
+
 class MonthlyMetricsResponse(PeriodMetricsResponse):
     month: str
 

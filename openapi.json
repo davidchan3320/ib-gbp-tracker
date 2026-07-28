@@ -296,6 +296,91 @@
         }
       }
     },
+    "/api/v1/ib/daily": {
+      "get": {
+        "tags": [
+          "market data"
+        ],
+        "summary": "Fetch one daily OHLC bar directly from Interactive Brokers",
+        "description": "Requests a `1 day` historical bar directly from IB Gateway and returns the bar whose IB session date matches `day`. The response is not read from the database.",
+        "operationId": "get_ib_daily_bar_api_v1_ib_daily_get",
+        "parameters": [
+          {
+            "name": "day",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "description": "IB session date in `YYYY-MM-DD` format.",
+              "title": "Day"
+            },
+            "description": "IB session date in `YYYY-MM-DD` format."
+          },
+          {
+            "name": "price_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PriceType",
+              "default": "midpoint"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IBDailyBarResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/metrics/monthly": {
       "get": {
         "tags": [
@@ -1014,6 +1099,59 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "IBDailyBarResponse": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "pair": {
+            "type": "string",
+            "title": "Pair"
+          },
+          "bar_size": {
+            "type": "string",
+            "title": "Bar Size"
+          },
+          "price_type": {
+            "$ref": "#/components/schemas/PriceType"
+          },
+          "day": {
+            "type": "string",
+            "format": "date",
+            "title": "Day"
+          },
+          "open": {
+            "type": "number",
+            "title": "Open"
+          },
+          "close": {
+            "type": "number",
+            "title": "Close"
+          },
+          "high": {
+            "type": "number",
+            "title": "High"
+          },
+          "low": {
+            "type": "number",
+            "title": "Low"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider",
+          "pair",
+          "bar_size",
+          "price_type",
+          "day",
+          "open",
+          "close",
+          "high",
+          "low"
+        ],
+        "title": "IBDailyBarResponse"
       },
       "MetricsResponse": {
         "properties": {

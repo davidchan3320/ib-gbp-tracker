@@ -14,12 +14,14 @@ from app.config import Settings, get_settings
 from app.db import Database
 from app.domain import PRICE_TYPES, PriceType
 from app.providers import build_provider
+from app.providers.ib import IBHistoricalDataProvider
 from app.schemas import (
     BarResponse,
     BarsEnvelope,
     DailyMetricsBatchResponse,
     DailyMetricsResponse,
     ErrorResponse,
+    IBDailyBarResponse,
     MetricsResponse,
     MonthlyMetricsBatchResponse,
     MonthlyMetricsResponse,
@@ -106,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.metric_cache = metric_cache
     app.state.repository = repository
     app.state.collector = collector
+    app.state.provider = provider
 
     def period_metric_fields(summary: BarPeriodSummary) -> dict[str, int | float]:
         snapshot = calculate_period_metrics(
@@ -355,6 +358,70 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             has_more=has_more,
             next_cursor=metrics[0].day if has_more and metrics else None,
             metrics=metrics,
+        )
+
+    @app.get(
+        "/api/v1/ib/daily",
+        response_model=IBDailyBarResponse,
+        responses={
+            404: {"model": ErrorResponse},
+            502: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+        summary="Fetch one daily OHLC bar directly from Interactive Brokers",
+        description=(
+            "Requests a `1 day` historical bar directly from IB Gateway and returns the bar "
+            "whose IB session date matches `day`. The response is not read from the database."
+        ),
+        tags=["market data"],
+    )
+    async def get_ib_daily_bar(
+        day: Annotated[
+            date,
+            Query(description="IB session date in `YYYY-MM-DD` format."),
+        ],
+        price_type: PriceType = PriceType.MIDPOINT,
+    ) -> IBDailyBarResponse:
+        if not isinstance(provider, IBHistoricalDataProvider):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Direct IB data requires DATA_PROVIDER=ib.",
+            )
+        if day == date.max:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'day' must be earlier than 9999-12-31",
+            )
+
+        try:
+            bar = await provider.fetch_daily_bar(
+                pair=runtime_settings.fx_pair,
+                day=day,
+                price_type=price_type,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=str(exc),
+            ) from exc
+        if bar is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"IB returned no {price_type.value} daily bar for "
+                    f"{day.isoformat()}."
+                ),
+            )
+        return IBDailyBarResponse(
+            provider="ib",
+            pair=runtime_settings.display_pair,
+            bar_size="1 day",
+            price_type=price_type,
+            day=day,
+            open=float(bar.open),
+            close=float(bar.close),
+            high=float(bar.high),
+            low=float(bar.low),
         )
 
     @app.get(

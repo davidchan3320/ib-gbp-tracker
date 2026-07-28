@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -83,6 +83,45 @@ class IBHistoricalDataProvider(HistoricalDataProvider):
                 raise
             except Exception as exc:
                 raise RuntimeError(f"IB historical data request failed: {exc}") from exc
+
+    async def fetch_daily_bar(
+        self,
+        *,
+        pair: str,
+        day: date,
+        price_type: PriceType,
+    ) -> PriceBar | None:
+        """Fetch the daily bar whose IB session date matches ``day``."""
+        if day == date.max:
+            raise ValueError("day must be earlier than 9999-12-31")
+
+        end_at = datetime.combine(day + timedelta(days=1), time.min, tzinfo=UTC)
+        async with self._request_lock:
+            try:
+                client, contract = await self._connected_contract(pair)
+                rows = list(
+                    await client.reqHistoricalDataAsync(
+                        contract,
+                        endDateTime=end_at,
+                        durationStr="2 D",
+                        barSizeSetting="1 day",
+                        whatToShow=IB_PRICE_TYPES[price_type],
+                        useRTH=False,
+                        formatDate=2,
+                        keepUpToDate=False,
+                        timeout=self.settings.ib_timeout_seconds,
+                    )
+                )
+                matching = [
+                    self._to_price_bar(row, price_type)
+                    for row in rows
+                    if self._timestamp_utc(row.date).date() == day
+                ]
+                return matching[-1] if matching else None
+            except IBConnectionError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(f"IB daily historical data request failed: {exc}") from exc
 
     async def _connected_contract(self, pair: str) -> tuple[Any, Any]:
         # Import lazily so demo mode stays usable even if the Gateway stack changes.

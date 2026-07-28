@@ -71,6 +71,66 @@ async def test_ib_provider_requests_midpoint_bars_in_readonly_mode(monkeypatch) 
     assert provider._client is None
 
 
+async def test_ib_provider_fetches_one_selected_daily_bar(monkeypatch) -> None:
+    calls = {}
+
+    class FakeIB:
+        connected = False
+
+        async def connectAsync(self, host, port, **kwargs):
+            self.connected = True
+
+        async def qualifyContractsAsync(self, contract):
+            return [contract]
+
+        async def reqHistoricalDataAsync(self, contract, **kwargs):
+            calls["history"] = kwargs
+            return [
+                SimpleNamespace(
+                    date="20260726",
+                    open=1.30,
+                    high=1.32,
+                    low=1.29,
+                    close=1.31,
+                ),
+                SimpleNamespace(
+                    date="20260727",
+                    open=1.31,
+                    high=1.34,
+                    low=1.30,
+                    close=1.33,
+                ),
+            ]
+
+        def isConnected(self):
+            return self.connected
+
+        def disconnect(self):
+            self.connected = False
+
+    monkeypatch.setattr(ib_async, "IB", FakeIB)
+    provider = IBHistoricalDataProvider(Settings(data_provider="ib"))
+
+    bar = await provider.fetch_daily_bar(
+        pair="GBPUSD",
+        day=datetime(2026, 7, 27).date(),
+        price_type=PriceType.MIDPOINT,
+    )
+
+    assert bar is not None
+    assert bar.timestamp == datetime(2026, 7, 27, tzinfo=UTC)
+    assert bar.open == Decimal("1.31")
+    assert bar.close == Decimal("1.33")
+    assert bar.high == Decimal("1.34")
+    assert bar.low == Decimal("1.3")
+    assert calls["history"]["endDateTime"] == datetime(2026, 7, 28, tzinfo=UTC)
+    assert calls["history"]["durationStr"] == "2 D"
+    assert calls["history"]["barSizeSetting"] == "1 day"
+    assert calls["history"]["whatToShow"] == "MIDPOINT"
+    assert calls["history"]["useRTH"] is False
+    assert calls["history"]["formatDate"] == 2
+
+
 def test_ib_unavailable_bar_statistics_become_null() -> None:
     bar = SimpleNamespace(
         date=datetime(2026, 7, 27, 4, tzinfo=UTC),
