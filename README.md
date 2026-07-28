@@ -2,8 +2,9 @@
 
 FX Tape collects one-minute GBP/USD bid, ask, and midpoint bars from Interactive Brokers Gateway.
 It stores each OHLC series plus any available volume, weighted-average price, and trade count in
-SQLite or PostgreSQL, calculates midpoint metrics, and serves a responsive dashboard plus a
-documented REST API. A separate CLI owns the resumable historical backfill.
+SQLite or PostgreSQL, calculates live and calendar-period metrics, and serves a responsive dashboard
+plus a documented REST API. A separate CLI owns the resumable historical backfill, while SQLite,
+PostgreSQL, or Redis can cache calendar aggregates.
 
 The app starts in **demo mode**, so the entire collector, database, chart, and metrics path can be
 evaluated without an IB account. Switching one environment variable activates the real IB
@@ -28,29 +29,64 @@ optional database UI; start it with `docker compose up -d adminer`. Open
 docker compose logs -f app
 ```
 
+The expected core services are `app`, `db`, and `redis`. Check Redis directly from inside its
+container with:
+
+```bash
+docker compose exec redis redis-cli ping
+```
+
+It should print `PONG`.
+
 Stop the stack with `docker compose down`. The named PostgreSQL volume is retained; running
 `docker compose down -v` also deletes all stored market data. Redis is a disposable cache capped at
 64 MiB with `allkeys-lru`, so it is intentionally empty after the Redis container is recreated.
 
 The image runs as an unprivileged user, has a built-in API health check, and uses a read-only root
 filesystem under Compose. Build it without starting services using `docker compose build app`.
+Redis is published only on the host loopback address, using `REDIS_PORT` (default `6379`).
 
 See [Database design, migration, and first setup](docs/database.md) for the complete PostgreSQL and
 SQLite schema, startup migration behavior, environment configuration, and inspection commands.
 
 ## Local quick start
 
-Requirements: Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+Run the Python app directly while Docker Compose provides PostgreSQL and Redis. This workflow does
+not build the application image.
+
+Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), and Docker Engine with the Compose
+plugin.
 
 ```bash
 cp .env.example .env
+docker compose up -d db redis
+docker compose ps db redis
 uv sync
+```
+
+Set these values in `.env` so the host-run app connects to the containers through their loopback
+ports:
+
+```dotenv
+DATABASE_URL=postgresql+asyncpg://fx_tape:fx_tape_local@127.0.0.1:5432/fx_tape
+METRICS_CACHE_BACKEND=redis
+METRICS_CACHE_URL=redis://127.0.0.1:6379/0
+```
+
+Then start the app without Docker:
+
+```bash
 uv run uvicorn app.main:app --reload
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The scheduler creates a synthetic initial
-history in the background. `Sync now` can be used at any time. API documentation is available at
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000), or verify it with
+`curl http://127.0.0.1:8000/healthz`. The scheduler creates a synthetic initial history in the
+background, and API documentation is available at
 [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+
+Stop the supporting containers with `docker compose stop db redis`, or use `docker compose down`.
+PostgreSQL data is retained in the `fx_tape_postgres` volume; use `docker compose down -v` only
+when you also want to remove that local data.
 
 Run the checks with:
 
@@ -159,12 +195,15 @@ IB Gateway socket / demo generator
                 ▼
   idempotent typed-OHLC database upsert
                 │
-        ┌───────┴────────┐
-        ▼                ▼
-    REST API       metric calculators
-        └───────┬────────┘
-                ▼
-             dashboard
+        ┌───────┴──────────────┐
+        ▼                      ▼
+    REST API             metric calculators
+        │                      │
+        │                      ▼
+        │              generation-safe cache
+        └──────────┬───────────┘
+                   ▼
+                dashboard
 ```
 
 The database contains one normalized `ohlc_bars` table with `price_type`, `timestamp`, `open`,
@@ -253,7 +292,7 @@ to zero against a real Gateway.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/healthz` | Process liveness |
-| `GET` | `/api/v1/status` | Collector, provider, database, and latest sync state |
+| `GET` | `/api/v1/status` | Collector, database, cache backend, and latest sync state |
 | `GET` | `/api/v1/bars` | Time-range and cursor-paginated `bid`, `ask`, or `midpoint` bars |
 | `GET` | `/api/v1/metrics` | Midpoint price, 24h range/change, SMA 20, ATR 14, realized vol |
 | `GET` | `/api/v1/metrics/daily` | OHLC and two averages for one day or a day range |
@@ -337,6 +376,38 @@ are omitted; a range with no data returns `200` with an empty `metrics` list. A 
 either the single-period parameter or both range parameters, and cannot mix the two forms. Ranges
 are limited to 10,000 calendar periods per request.
 
+Example batch page:
+
+```json
+{
+  "pair": "GBP/USD",
+  "bar_size": "1 min",
+  "price_type": "midpoint",
+  "timezone": "UTC",
+  "start": "2026-01",
+  "end": "2027-01",
+  "count": 1,
+  "has_more": true,
+  "next_cursor": "2026-09",
+  "metrics": [
+    {
+      "pair": "GBP/USD",
+      "bar_size": "1 min",
+      "price_type": "midpoint",
+      "timezone": "UTC",
+      "bar_count": 43200,
+      "open": 1.318,
+      "close": 1.337,
+      "high": 1.351,
+      "low": 1.301,
+      "average_open_close": 1.3275,
+      "average_high_low": 1.326,
+      "month": "2026-09"
+    }
+  ]
+}
+```
+
 Each request covers the corresponding half-open UTC calendar interval. `open` comes from the first
 stored bar, `close` from the last stored bar, `high` and `low` are the period's extremes, and
 `bar_count` shows how many stored bars contributed. The derived fields are:
@@ -352,6 +423,12 @@ Both single and batch requests aggregate in the database on demand.
 Calendar metric aggregates and cursor pages support SQLite, PostgreSQL, or Redis cache backends.
 When no backend is configured, the cache uses the application database's SQLite/PostgreSQL type and
 URL. The default TTL is five minutes and can be changed or disabled in `.env`:
+
+| Backend value | URL example | Typical use |
+| --- | --- | --- |
+| `sqlite` | `sqlite+aiosqlite:///./fx_tape_cache.db` | Local or single-process deployment |
+| `postgresql` / `pgsql` | `postgresql+asyncpg://user:pass@host/cache` | Shared SQL deployment |
+| `redis` | `redis://host:6379/0` | Lowest-latency shared cache |
 
 ```dotenv
 METRICS_CACHE_BACKEND=sqlite
@@ -377,7 +454,8 @@ Docker Compose includes Redis and selects it by default with
 `METRICS_CACHE_URL=redis://redis:6379/0`. The API and backfill services wait for the Redis health
 check before starting. Override `METRICS_CACHE_BACKEND` and `METRICS_CACHE_URL` to use SQLite or
 PostgreSQL instead; the Redis container remains harmless and disposable when another backend is
-selected.
+selected. The bundled Redis has no password because it is not published outside the private Compose
+network; use authenticated `redis://` or TLS `rediss://` endpoints outside local development.
 
 `METRICS_CACHE_URL` may be omitted when the selected SQL backend matches `DATABASE_URL`; the same
 database and connection settings are then reused. A separate SQLite URL creates only the cache
@@ -412,16 +490,19 @@ demand; only disposable TTL cache entries are stored, never canonical metric rec
 
 ```text
 app/
+  config.py                validated application and cache settings
   cli.py                   standalone backfill commands and worker lock
   main.py                  FastAPI routes and lifecycle
-  models.py                OHLC bars and backfill checkpoint tables
+  models.py                OHLC, checkpoint, cache, and generation tables
   providers/               IB and deterministic demo adapters
   services/backfill.py     resumable 2017-to-present backfill engine
+  services/cache.py        SQLite, PostgreSQL, and Redis cache backends
   services/collector.py    incremental collection orchestration
   services/metrics.py      extensible metric calculations
+  services/repository.py   bar persistence, aggregation, and cache integration
   static/                  dependency-free dashboard
 Dockerfile                 non-root multi-stage API/CLI image
-compose.yaml               API, optional backfill worker, and PostgreSQL
+compose.yaml               API, PostgreSQL, Redis, Adminer, and optional backfill worker
 .dockerignore              minimal Docker build context
 docs/database.md           schema, migration, and first-environment setup
 scripts/export_openapi.py  deterministic OpenAPI export
