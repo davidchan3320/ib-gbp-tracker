@@ -186,6 +186,8 @@ def test_demo_sync_persists_and_exposes_bars(tmp_path: Path) -> None:
     assert tables == [
         ("backfill_checkpoints",),
         ("ib_daily_bars",),
+        ("ib_monthly_bars",),
+        ("ib_weekly_bars",),
         ("metric_cache",),
         ("metric_cache_state",),
         ("ohlc_bars",),
@@ -323,6 +325,7 @@ def test_direct_ib_weekly_bar_returns_gateway_ohlc(tmp_path: Path, monkeypatch) 
     )
     app = create_app(settings)
     requested = {}
+    close_price = {"value": Decimal("1.3400")}
 
     async def fetch_weekly_bar(*, pair, week_start, price_type):
         requested.update(pair=pair, week_start=week_start, price_type=price_type)
@@ -330,7 +333,7 @@ def test_direct_ib_weekly_bar_returns_gateway_ohlc(tmp_path: Path, monkeypatch) 
             price_type=price_type,
             timestamp=datetime(2026, 7, 27, tzinfo=UTC),
             open=Decimal("1.3100"),
-            close=Decimal("1.3400"),
+            close=close_price["value"],
             high=Decimal("1.3500"),
             low=Decimal("1.3000"),
         )
@@ -339,6 +342,11 @@ def test_direct_ib_weekly_bar_returns_gateway_ohlc(tmp_path: Path, monkeypatch) 
 
     with TestClient(app) as client:
         response = client.get(
+            "/api/v1/ib/weekly",
+            params={"week": "2026-W31", "price_type": "ask"},
+        )
+        close_price["value"] = Decimal("1.3450")
+        refreshed_response = client.get(
             "/api/v1/ib/weekly",
             params={"week": "2026-W31", "price_type": "ask"},
         )
@@ -354,12 +362,28 @@ def test_direct_ib_weekly_bar_returns_gateway_ohlc(tmp_path: Path, monkeypatch) 
         "close": 1.34,
         "high": 1.35,
         "low": 1.3,
+        "stored": True,
     }
+    assert refreshed_response.status_code == 200
+    assert refreshed_response.json()["close"] == 1.345
+    assert refreshed_response.json()["stored"] is True
     assert requested == {
         "pair": "GBPUSD",
         "week_start": date(2026, 7, 27),
         "price_type": PriceType.ASK,
     }
+
+    with sqlite3.connect(tmp_path / "ib-weekly.db") as connection:
+        stored_rows = connection.execute(
+            """
+            SELECT price_type, week_start, open, high, low, close, updated_at
+            FROM ib_weekly_bars
+            """
+        ).fetchall()
+
+    assert len(stored_rows) == 1
+    assert stored_rows[0][:6] == ("ask", "2026-07-27", 1.31, 1.35, 1.3, 1.345)
+    assert stored_rows[0][6] is not None
 
 
 def test_direct_ib_weekly_bar_requires_ib_provider(tmp_path: Path) -> None:
@@ -371,6 +395,92 @@ def test_direct_ib_weekly_bar_requires_ib_provider(tmp_path: Path) -> None:
 
     with TestClient(create_app(settings)) as client:
         response = client.get("/api/v1/ib/weekly", params={"week": "2026-W31"})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Direct IB data requires DATA_PROVIDER=ib."}
+
+
+def test_direct_ib_monthly_bar_returns_and_stores_gateway_ohlc(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = Settings(
+        data_provider="ib",
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'ib-monthly.db'}",
+        scheduler_enabled=False,
+    )
+    app = create_app(settings)
+    requested = {}
+    close_price = {"value": Decimal("1.3500")}
+
+    async def fetch_monthly_bar(*, pair, month_start, price_type):
+        requested.update(pair=pair, month_start=month_start, price_type=price_type)
+        return PriceBar(
+            price_type=price_type,
+            timestamp=datetime(2026, 7, 1, tzinfo=UTC),
+            open=Decimal("1.3100"),
+            close=close_price["value"],
+            high=Decimal("1.3600"),
+            low=Decimal("1.3000"),
+        )
+
+    monkeypatch.setattr(app.state.provider, "fetch_monthly_bar", fetch_monthly_bar)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/ib/monthly",
+            params={"month": "2026-07", "price_type": "bid"},
+        )
+        close_price["value"] = Decimal("1.3550")
+        refreshed_response = client.get(
+            "/api/v1/ib/monthly",
+            params={"month": "2026-07", "price_type": "bid"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "provider": "ib",
+        "pair": "GBP/USD",
+        "bar_size": "1 month",
+        "price_type": "bid",
+        "month": "2026-07",
+        "open": 1.31,
+        "close": 1.35,
+        "high": 1.36,
+        "low": 1.3,
+        "stored": True,
+    }
+    assert refreshed_response.status_code == 200
+    assert refreshed_response.json()["close"] == 1.355
+    assert refreshed_response.json()["stored"] is True
+    assert requested == {
+        "pair": "GBPUSD",
+        "month_start": date(2026, 7, 1),
+        "price_type": PriceType.BID,
+    }
+
+    with sqlite3.connect(tmp_path / "ib-monthly.db") as connection:
+        stored_rows = connection.execute(
+            """
+            SELECT price_type, month_start, open, high, low, close, updated_at
+            FROM ib_monthly_bars
+            """
+        ).fetchall()
+
+    assert len(stored_rows) == 1
+    assert stored_rows[0][:6] == ("bid", "2026-07-01", 1.31, 1.36, 1.3, 1.355)
+    assert stored_rows[0][6] is not None
+
+
+def test_direct_ib_monthly_bar_requires_ib_provider(tmp_path: Path) -> None:
+    settings = Settings(
+        data_provider="demo",
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'demo-monthly.db'}",
+        scheduler_enabled=False,
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/v1/ib/monthly", params={"month": "2026-07"})
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Direct IB data requires DATA_PROVIDER=ib."}
@@ -958,5 +1068,5 @@ def test_schema_migrates_existing_midpoint_table_to_composite_key(tmp_path: Path
     ]
     assert {column[1]: column[5] for column in columns}["price_type"] == 1
     assert {column[1]: column[5] for column in columns}["timestamp"] == 2
-    assert "ib_daily_bars" in tables
+    assert {"ib_daily_bars", "ib_weekly_bars", "ib_monthly_bars"} <= tables
     assert migrated == ("midpoint", "2026-07-27 12:00:00", 0.77, 0.78, 0.76, 0.775)

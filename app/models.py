@@ -36,7 +36,20 @@ class OHLCBar(Base):
     trade_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
-class IBDailyBar(Base):
+class IBNativeOHLCMixin:
+    price_type: Mapped[str] = mapped_column(
+        Text,
+        primary_key=True,
+        default=PriceType.MIDPOINT.value,
+    )
+    open: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    high: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    low: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    close: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class IBDailyBar(IBNativeOHLCMixin, Base):
     __tablename__ = "ib_daily_bars"
     __table_args__ = (
         CheckConstraint(
@@ -45,17 +58,31 @@ class IBDailyBar(Base):
         ),
     )
 
-    price_type: Mapped[str] = mapped_column(
-        Text,
-        primary_key=True,
-        default=PriceType.MIDPOINT.value,
-    )
     day: Mapped[date] = mapped_column(Date, primary_key=True)
-    open: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
-    high: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
-    low: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
-    close: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class IBWeeklyBar(IBNativeOHLCMixin, Base):
+    __tablename__ = "ib_weekly_bars"
+    __table_args__ = (
+        CheckConstraint(
+            "price_type IN ('bid', 'ask', 'midpoint')",
+            name="ck_ib_weekly_bars_price_type",
+        ),
+    )
+
+    week_start: Mapped[date] = mapped_column(Date, primary_key=True)
+
+
+class IBMonthlyBar(IBNativeOHLCMixin, Base):
+    __tablename__ = "ib_monthly_bars"
+    __table_args__ = (
+        CheckConstraint(
+            "price_type IN ('bid', 'ask', 'midpoint')",
+            name="ck_ib_monthly_bars_price_type",
+        ),
+    )
+
+    month_start: Mapped[date] = mapped_column(Date, primary_key=True)
 
 
 class BackfillCheckpoint(Base):

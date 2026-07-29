@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Literal
 
 from sqlalchemy import Integer, case, cast, func, select, update
@@ -11,7 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from app.domain import PriceType
-from app.models import BackfillCheckpoint, IBDailyBar, MetricCacheState, OHLCBar
+from app.models import (
+    BackfillCheckpoint,
+    IBDailyBar,
+    IBMonthlyBar,
+    IBWeeklyBar,
+    MetricCacheState,
+    OHLCBar,
+)
 from app.providers.base import PriceBar
 from app.services.cache import MetricCacheBackend, NullMetricCache
 
@@ -107,9 +114,42 @@ class BarRepository:
 
     async def upsert_ib_daily_bar(self, bar: PriceBar) -> None:
         """Persist one native IB daily bar without mixing it with minute bars."""
+        await self._upsert_ib_period_bar(
+            model=IBDailyBar,
+            period_name="day",
+            period_start=as_utc(bar.timestamp).date(),
+            bar=bar,
+        )
+
+    async def upsert_ib_weekly_bar(self, bar: PriceBar, *, week_start: date) -> None:
+        """Persist one native IB weekly bar under its requested ISO-week start."""
+        await self._upsert_ib_period_bar(
+            model=IBWeeklyBar,
+            period_name="week_start",
+            period_start=week_start,
+            bar=bar,
+        )
+
+    async def upsert_ib_monthly_bar(self, bar: PriceBar, *, month_start: date) -> None:
+        """Persist one native IB monthly bar under its requested month start."""
+        await self._upsert_ib_period_bar(
+            model=IBMonthlyBar,
+            period_name="month_start",
+            period_start=month_start,
+            bar=bar,
+        )
+
+    async def _upsert_ib_period_bar(
+        self,
+        *,
+        model: type[IBDailyBar] | type[IBWeeklyBar] | type[IBMonthlyBar],
+        period_name: str,
+        period_start: date,
+        bar: PriceBar,
+    ) -> None:
         value = {
             "price_type": bar.price_type.value,
-            "day": as_utc(bar.timestamp).date(),
+            period_name: period_start,
             "open": bar.open,
             "high": bar.high,
             "low": bar.low,
@@ -125,12 +165,13 @@ class BarRepository:
                     insert = sqlite_insert
                 else:
                     raise RuntimeError(
-                        f"Unsupported database dialect for daily bar upsert: {dialect}"
+                        f"Unsupported database dialect for native period bar upsert: {dialect}"
                     )
 
-                statement = insert(IBDailyBar).values(value)
+                period_column = getattr(model, period_name)
+                statement = insert(model).values(value)
                 statement = statement.on_conflict_do_update(
-                    index_elements=[IBDailyBar.price_type, IBDailyBar.day],
+                    index_elements=[model.price_type, period_column],
                     set_={
                         "open": statement.excluded.open,
                         "high": statement.excluded.high,

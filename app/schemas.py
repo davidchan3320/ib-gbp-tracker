@@ -112,6 +112,20 @@ class IBWeeklyBarResponse(BaseModel):
     close: float
     high: float
     low: float
+    stored: bool
+
+
+class IBMonthlyBarResponse(BaseModel):
+    provider: str
+    pair: str
+    bar_size: str
+    price_type: PriceType
+    month: str
+    open: float
+    close: float
+    high: float
+    low: float
+    stored: bool
 
 
 class MonthlyMetricsResponse(PeriodMetricsResponse):

@@ -6,7 +6,8 @@ FX Tape supports PostgreSQL and SQLite. PostgreSQL is the recommended target for
 The database is intentionally scoped to one configured pair and one configured minute-bar size.
 The default pair is `GBPUSD`, meaning USD per 1 GBP. Pair and minute-bar size are not repeated on
 every market-data row, so a database must not mix configurations. The `ib_daily_bars` table is a
-separate fixed-`1 day` series for that same pair.
+separate fixed-`1 day` series for that same pair; `ib_weekly_bars` and `ib_monthly_bars` hold the
+corresponding native IB periods.
 
 ## Data flow
 
@@ -15,11 +16,11 @@ IB Gateway / demo provider
           │
    ┌──────┼──────────────┐
    ▼      ▼              ▼
-collector backfill CLI  direct daily API (IB only)
+collector backfill CLI  direct calendar APIs (IB only)
    │      ├───────────> backfill_checkpoints
    └──┬───┘              │
       ▼                  ▼
- ohlc_bars          ib_daily_bars
+ ohlc_bars          native IB period tables
       │
       ├────────────> REST API / metrics
       └────────────> metric cache (SQLite / PostgreSQL / Redis)
@@ -122,44 +123,54 @@ change or metrics table; the aggregate query does not load every minute bar into
 memory. Batch queries group the bars into UTC calendar buckets in one query, rank the first and
 last bar within each bucket, and omit buckets without data.
 
-## `ib_daily_bars`
+## Native IB calendar-bar tables
 
-`GET /api/v1/ib/daily` fetches one native `1 day` historical bar from IB Gateway and stores it in
-this dedicated table before returning it. Daily bars are kept separate from `ohlc_bars` because the
-latter contains the database's configured minute-bar series and has no bar-size key. The composite
-primary key `(price_type, day)` makes repeated requests idempotent; a later fetch refreshes the OHLC
-values and `updated_at` for the existing row.
+The direct IB endpoints fetch one native historical bar and store it before returning:
+
+| Endpoint | IB bar size | Table | Composite primary key |
+| --- | --- | --- | --- |
+| `/api/v1/ib/daily` | `1 day` | `ib_daily_bars` | `(price_type, day)` |
+| `/api/v1/ib/weekly` | `1 week` | `ib_weekly_bars` | `(price_type, week_start)` |
+| `/api/v1/ib/monthly` | `1 month` | `ib_monthly_bars` | `(price_type, month_start)` |
+
+The normalized weekly key is the requested ISO week's Monday, and the monthly key is the first day
+of the requested month. Repeated requests are idempotent: a later fetch refreshes the OHLC values
+and `updated_at` for the existing price-type/period row. These tables stay separate from
+`ohlc_bars`, which contains the configured minute series and has no bar-size key.
+
+All three tables share these columns, with only the period-key name changing:
 
 | Column | PostgreSQL type | Null | Purpose |
 | --- | --- | --- | --- |
 | `price_type` | `TEXT` | No | `bid`, `ask`, or `midpoint` |
-| `day` | `DATE` | No | IB session date |
-| `open` | `NUMERIC(18,8)` | No | Native daily opening price |
-| `high` | `NUMERIC(18,8)` | No | Native daily high |
-| `low` | `NUMERIC(18,8)` | No | Native daily low |
-| `close` | `NUMERIC(18,8)` | No | Native daily closing price |
+| `day`, `week_start`, or `month_start` | `DATE` | No | Normalized period key |
+| `open` | `NUMERIC(18,8)` | No | Native period opening price |
+| `high` | `NUMERIC(18,8)` | No | Native period high |
+| `low` | `NUMERIC(18,8)` | No | Native period low |
+| `close` | `NUMERIC(18,8)` | No | Native period closing price |
 | `updated_at` | `TIMESTAMPTZ` | No | UTC time of the latest successful upsert |
 
-Equivalent PostgreSQL DDL:
+Equivalent PostgreSQL DDL for the weekly table (the daily and monthly tables substitute their
+period-key column and constraint names):
 
 ```sql
-CREATE TABLE ib_daily_bars (
+CREATE TABLE ib_weekly_bars (
     price_type TEXT NOT NULL,
-    day DATE NOT NULL,
+    week_start DATE NOT NULL,
     open NUMERIC(18, 8) NOT NULL,
     high NUMERIC(18, 8) NOT NULL,
     low NUMERIC(18, 8) NOT NULL,
     close NUMERIC(18, 8) NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (price_type, day),
-    CONSTRAINT ck_ib_daily_bars_price_type
+    PRIMARY KEY (price_type, week_start),
+    CONSTRAINT ck_ib_weekly_bars_price_type
         CHECK (price_type IN ('bid', 'ask', 'midpoint'))
 );
 ```
 
-The configured currency pair applies to every row and is not duplicated in this table. Native
-daily bars are not used by the minute-bar calendar aggregation endpoints, and writing them does not
-invalidate the minute-derived metric cache.
+The configured currency pair applies to every native-period row and is not duplicated in these
+tables. They are not used by the minute-bar calendar aggregation endpoints, and writing them does
+not invalidate the minute-derived metric cache.
 
 ## API time-range pagination
 
@@ -290,8 +301,8 @@ called at API startup and before CLI backfill commands. It performs these transa
    `midpoint`, replace the old table, and establish the composite primary key.
 3. Add `volume`, `weighted_average_price`, or `trade_count` when missing.
 4. Add the timestamp index when missing.
-5. Create any missing model tables, including `ib_daily_bars`, the cache, and
-   `backfill_checkpoints`.
+5. Create any missing model tables, including all three native IB calendar-bar tables, the cache,
+   and `backfill_checkpoints`.
 6. Ensure the singleton `metric_cache_state` generation row exists.
 
 This startup migration is sufficient for the schema changes currently implemented, but
@@ -345,6 +356,8 @@ Inspect the created schema:
 docker compose exec db psql -U fx_tape -d fx_tape -c '\dt'
 docker compose exec db psql -U fx_tape -d fx_tape -c '\d+ ohlc_bars'
 docker compose exec db psql -U fx_tape -d fx_tape -c '\d+ ib_daily_bars'
+docker compose exec db psql -U fx_tape -d fx_tape -c '\d+ ib_weekly_bars'
+docker compose exec db psql -U fx_tape -d fx_tape -c '\d+ ib_monthly_bars'
 docker compose exec db psql -U fx_tape -d fx_tape -c '\d+ backfill_checkpoints'
 ```
 

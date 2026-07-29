@@ -22,6 +22,7 @@ from app.schemas import (
     DailyMetricsResponse,
     ErrorResponse,
     IBDailyBarResponse,
+    IBMonthlyBarResponse,
     IBWeeklyBarResponse,
     MetricsResponse,
     MonthlyMetricsBatchResponse,
@@ -119,7 +120,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="FX Tape API",
-        version="0.8.0",
+        version="0.9.0",
         description="Collect and inspect one-minute GBP/USD bid, ask, and midpoint OHLC bars.",
         lifespan=lifespan,
     )
@@ -603,12 +604,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             404: {"model": ErrorResponse},
             502: {"model": ErrorResponse},
             503: {"model": ErrorResponse},
+            500: {"model": ErrorResponse},
         },
-        summary="Fetch one weekly OHLC bar directly from Interactive Brokers",
+        summary="Fetch and store one weekly OHLC bar from Interactive Brokers",
         description=(
             "Requests a `1 week` historical bar directly from IB Gateway and returns the bar "
-            "whose IB date belongs to the requested Monday-based ISO week. The response is not "
-            "read from or written to the database."
+            "whose IB date belongs to the requested Monday-based ISO week. A successful result "
+            "is idempotently stored in the database's dedicated `ib_weekly_bars` table."
         ),
         tags=["market data"],
     )
@@ -651,6 +653,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"IB returned no {price_type.value} weekly bar for {week}.",
             )
+        try:
+            await repository.upsert_ib_weekly_bar(bar, week_start=week_start_date)
+        except Exception as exc:
+            logger.exception("Failed to store the IB weekly bar")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="IB weekly bar was fetched but could not be stored.",
+            ) from exc
         return IBWeeklyBarResponse(
             provider="ib",
             pair=runtime_settings.display_pair,
@@ -661,6 +671,84 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             close=float(bar.close),
             high=float(bar.high),
             low=float(bar.low),
+            stored=True,
+        )
+
+    @app.get(
+        "/api/v1/ib/monthly",
+        response_model=IBMonthlyBarResponse,
+        responses={
+            404: {"model": ErrorResponse},
+            502: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+            500: {"model": ErrorResponse},
+        },
+        summary="Fetch and store one monthly OHLC bar from Interactive Brokers",
+        description=(
+            "Requests a `1 month` historical bar directly from IB Gateway and returns the bar "
+            "whose IB date belongs to the requested calendar month. A successful result is "
+            "idempotently stored in the database's dedicated `ib_monthly_bars` table."
+        ),
+        tags=["market data"],
+    )
+    async def get_ib_monthly_bar(
+        month: Annotated[
+            str,
+            Query(
+                pattern=r"^\d{4}-(0[1-9]|1[0-2])$",
+                description="IB bar's calendar month in `YYYY-MM` format.",
+            ),
+        ],
+        price_type: PriceType = PriceType.MIDPOINT,
+    ) -> IBMonthlyBarResponse:
+        if not isinstance(provider, IBHistoricalDataProvider):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Direct IB data requires DATA_PROVIDER=ib.",
+            )
+        period_start = _parse_month(month, "month")
+        if period_start.year == 9999 and period_start.month == 12:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'month' must be earlier than 9999-12",
+            )
+        month_start = period_start.date()
+
+        try:
+            bar = await provider.fetch_monthly_bar(
+                pair=runtime_settings.fx_pair,
+                month_start=month_start,
+                price_type=price_type,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=str(exc),
+            ) from exc
+        if bar is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"IB returned no {price_type.value} monthly bar for {month}.",
+            )
+        try:
+            await repository.upsert_ib_monthly_bar(bar, month_start=month_start)
+        except Exception as exc:
+            logger.exception("Failed to store the IB monthly bar")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="IB monthly bar was fetched but could not be stored.",
+            ) from exc
+        return IBMonthlyBarResponse(
+            provider="ib",
+            pair=runtime_settings.display_pair,
+            bar_size="1 month",
+            price_type=price_type,
+            month=month,
+            open=float(bar.open),
+            close=float(bar.close),
+            high=float(bar.high),
+            low=float(bar.low),
+            stored=True,
         )
 
     @app.get(

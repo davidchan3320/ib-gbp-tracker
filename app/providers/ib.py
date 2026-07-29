@@ -167,6 +167,53 @@ class IBHistoricalDataProvider(HistoricalDataProvider):
             except Exception as exc:
                 raise RuntimeError(f"IB weekly historical data request failed: {exc}") from exc
 
+    async def fetch_monthly_bar(
+        self,
+        *,
+        pair: str,
+        month_start: date,
+        price_type: PriceType,
+    ) -> PriceBar | None:
+        """Fetch the monthly bar whose IB date belongs to the requested month."""
+        if month_start.day != 1:
+            raise ValueError("month_start must be the first day of a month")
+        if month_start.year == 9999 and month_start.month == 12:
+            raise ValueError("month_start must have a following month")
+
+        if month_start.month == 12:
+            end_day = month_start.replace(year=month_start.year + 1, month=1)
+        else:
+            end_day = month_start.replace(month=month_start.month + 1)
+
+        end_at = datetime.combine(end_day, time.min, tzinfo=UTC)
+        target_month = (month_start.year, month_start.month)
+        async with self._request_lock:
+            try:
+                client, contract = await self._connected_contract(pair)
+                rows = list(
+                    await client.reqHistoricalDataAsync(
+                        contract,
+                        endDateTime=end_at,
+                        durationStr="2 M",
+                        barSizeSetting="1 month",
+                        whatToShow=IB_PRICE_TYPES[price_type],
+                        useRTH=False,
+                        formatDate=2,
+                        keepUpToDate=False,
+                        timeout=self.settings.ib_timeout_seconds,
+                    )
+                )
+                matching = []
+                for row in rows:
+                    bar_day = self._timestamp_utc(row.date).date()
+                    if (bar_day.year, bar_day.month) == target_month:
+                        matching.append(self._to_price_bar(row, price_type))
+                return matching[-1] if matching else None
+            except IBConnectionError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(f"IB monthly historical data request failed: {exc}") from exc
+
     async def _connected_contract(self, pair: str) -> tuple[Any, Any]:
         # Import lazily so demo mode stays usable even if the Gateway stack changes.
         from ib_async import IB, Forex
