@@ -3,22 +3,26 @@
 FX Tape supports PostgreSQL and SQLite. PostgreSQL is the recommended target for the full
 2017-to-present one-minute backfill; SQLite is intended for local evaluation and smaller datasets.
 
-The database is intentionally scoped to one configured pair and bar size. The default pair is
-`GBPUSD`, meaning USD per 1 GBP. Pair and bar size are not repeated on every market-data row, so a
-database must not mix configurations.
+The database is intentionally scoped to one configured pair and one configured minute-bar size.
+The default pair is `GBPUSD`, meaning USD per 1 GBP. Pair and minute-bar size are not repeated on
+every market-data row, so a database must not mix configurations. The `ib_daily_bars` table is a
+separate fixed-`1 day` series for that same pair.
 
 ## Data flow
 
 ```text
 IB Gateway / demo provider
           │
-          ├── collector ───────────────┐
-          │                            ▼
-          └── backfill CLI ──────> ohlc_bars <──── REST API / metrics
-                    │                              │
-                    ├────────────> backfill_checkpoints
-                    │                              ▼
-                    └───────────────> metric cache (SQLite / PostgreSQL / Redis)
+   ┌──────┼──────────────┐
+   ▼      ▼              ▼
+collector backfill CLI  direct daily API (IB only)
+   │      ├───────────> backfill_checkpoints
+   └──┬───┘              │
+      ▼                  ▼
+ ohlc_bars          ib_daily_bars
+      │
+      ├────────────> REST API / metrics
+      └────────────> metric cache (SQLite / PostgreSQL / Redis)
 ```
 
 `backfill_checkpoints` is job metadata and the metric cache contains disposable derived results.
@@ -85,11 +89,12 @@ WHERE price_type = 'midpoint'
   AND timestamp <  TIMESTAMPTZ '2026-07-28 00:00:00+00';
 ```
 
-The daily, monthly, and yearly metrics endpoints expose this OHLC calculation for half-open UTC
-calendar periods:
+The daily, weekly, monthly, and yearly metrics endpoints expose this OHLC calculation for half-open
+UTC calendar periods. Weeks use the ISO week calendar and begin Monday at 00:00 UTC:
 
 ```text
 GET /api/v1/metrics/daily?day=2026-07-27&price_type=midpoint
+GET /api/v1/metrics/weekly?week=2026-W31&price_type=midpoint
 GET /api/v1/metrics/monthly?month=2026-07&price_type=midpoint
 GET /api/v1/metrics/yearly?year=2026&price_type=midpoint
 ```
@@ -98,6 +103,7 @@ Each endpoint also accepts a half-open range for batch aggregation:
 
 ```text
 GET /api/v1/metrics/daily?start=2026-07-01&end=2026-08-01
+GET /api/v1/metrics/weekly?start=2026-W01&end=2027-W01
 GET /api/v1/metrics/monthly?start=2026-01&end=2027-01
 GET /api/v1/metrics/yearly?start=2020&end=2027
 ```
@@ -115,6 +121,45 @@ first bar's `open`, the close is the last bar's `close`, and the extremes are `M
 change or metrics table; the aggregate query does not load every minute bar into application
 memory. Batch queries group the bars into UTC calendar buckets in one query, rank the first and
 last bar within each bucket, and omit buckets without data.
+
+## `ib_daily_bars`
+
+`GET /api/v1/ib/daily` fetches one native `1 day` historical bar from IB Gateway and stores it in
+this dedicated table before returning it. Daily bars are kept separate from `ohlc_bars` because the
+latter contains the database's configured minute-bar series and has no bar-size key. The composite
+primary key `(price_type, day)` makes repeated requests idempotent; a later fetch refreshes the OHLC
+values and `updated_at` for the existing row.
+
+| Column | PostgreSQL type | Null | Purpose |
+| --- | --- | --- | --- |
+| `price_type` | `TEXT` | No | `bid`, `ask`, or `midpoint` |
+| `day` | `DATE` | No | IB session date |
+| `open` | `NUMERIC(18,8)` | No | Native daily opening price |
+| `high` | `NUMERIC(18,8)` | No | Native daily high |
+| `low` | `NUMERIC(18,8)` | No | Native daily low |
+| `close` | `NUMERIC(18,8)` | No | Native daily closing price |
+| `updated_at` | `TIMESTAMPTZ` | No | UTC time of the latest successful upsert |
+
+Equivalent PostgreSQL DDL:
+
+```sql
+CREATE TABLE ib_daily_bars (
+    price_type TEXT NOT NULL,
+    day DATE NOT NULL,
+    open NUMERIC(18, 8) NOT NULL,
+    high NUMERIC(18, 8) NOT NULL,
+    low NUMERIC(18, 8) NOT NULL,
+    close NUMERIC(18, 8) NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (price_type, day),
+    CONSTRAINT ck_ib_daily_bars_price_type
+        CHECK (price_type IN ('bid', 'ask', 'midpoint'))
+);
+```
+
+The configured currency pair applies to every row and is not duplicated in this table. Native
+daily bars are not used by the minute-bar calendar aggregation endpoints, and writing them does not
+invalidate the minute-derived metric cache.
 
 ## API time-range pagination
 
@@ -245,7 +290,8 @@ called at API startup and before CLI backfill commands. It performs these transa
    `midpoint`, replace the old table, and establish the composite primary key.
 3. Add `volume`, `weighted_average_price`, or `trade_count` when missing.
 4. Add the timestamp index when missing.
-5. Create any missing model tables, including the cache and `backfill_checkpoints` tables.
+5. Create any missing model tables, including `ib_daily_bars`, the cache, and
+   `backfill_checkpoints`.
 6. Ensure the singleton `metric_cache_state` generation row exists.
 
 This startup migration is sufficient for the schema changes currently implemented, but
@@ -298,6 +344,7 @@ Inspect the created schema:
 ```bash
 docker compose exec db psql -U fx_tape -d fx_tape -c '\dt'
 docker compose exec db psql -U fx_tape -d fx_tape -c '\d+ ohlc_bars'
+docker compose exec db psql -U fx_tape -d fx_tape -c '\d+ ib_daily_bars'
 docker compose exec db psql -U fx_tape -d fx_tape -c '\d+ backfill_checkpoints'
 ```
 

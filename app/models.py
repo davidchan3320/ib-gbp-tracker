@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, Index, Integer, Numeric, Text
+from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, Index, Integer, Numeric, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.domain import PriceType
@@ -34,6 +34,28 @@ class OHLCBar(Base):
     volume: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
     weighted_average_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
     trade_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class IBDailyBar(Base):
+    __tablename__ = "ib_daily_bars"
+    __table_args__ = (
+        CheckConstraint(
+            "price_type IN ('bid', 'ask', 'midpoint')",
+            name="ck_ib_daily_bars_price_type",
+        ),
+    )
+
+    price_type: Mapped[str] = mapped_column(
+        Text,
+        primary_key=True,
+        default=PriceType.MIDPOINT.value,
+    )
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    open: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    high: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    low: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    close: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class BackfillCheckpoint(Base):

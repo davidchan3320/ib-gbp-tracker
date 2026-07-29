@@ -185,6 +185,7 @@ def test_demo_sync_persists_and_exposes_bars(tmp_path: Path) -> None:
 
     assert tables == [
         ("backfill_checkpoints",),
+        ("ib_daily_bars",),
         ("metric_cache",),
         ("metric_cache_state",),
         ("ohlc_bars",),
@@ -239,6 +240,7 @@ def test_direct_ib_daily_bar_returns_gateway_ohlc(tmp_path: Path, monkeypatch) -
     )
     app = create_app(settings)
     requested = {}
+    close_price = {"value": Decimal("1.3300")}
 
     async def fetch_daily_bar(*, pair, day, price_type):
         requested.update(pair=pair, day=day, price_type=price_type)
@@ -246,7 +248,7 @@ def test_direct_ib_daily_bar_returns_gateway_ohlc(tmp_path: Path, monkeypatch) -
             price_type=price_type,
             timestamp=datetime(2026, 7, 27, tzinfo=UTC),
             open=Decimal("1.3100"),
-            close=Decimal("1.3300"),
+            close=close_price["value"],
             high=Decimal("1.3400"),
             low=Decimal("1.3000"),
         )
@@ -255,6 +257,11 @@ def test_direct_ib_daily_bar_returns_gateway_ohlc(tmp_path: Path, monkeypatch) -
 
     with TestClient(app) as client:
         response = client.get(
+            "/api/v1/ib/daily",
+            params={"day": "2026-07-27", "price_type": "bid"},
+        )
+        close_price["value"] = Decimal("1.3350")
+        refreshed_response = client.get(
             "/api/v1/ib/daily",
             params={"day": "2026-07-27", "price_type": "bid"},
         )
@@ -270,12 +277,28 @@ def test_direct_ib_daily_bar_returns_gateway_ohlc(tmp_path: Path, monkeypatch) -
         "close": 1.33,
         "high": 1.34,
         "low": 1.3,
+        "stored": True,
     }
+    assert refreshed_response.status_code == 200
+    assert refreshed_response.json()["close"] == 1.335
+    assert refreshed_response.json()["stored"] is True
     assert requested == {
         "pair": "GBPUSD",
         "day": date(2026, 7, 27),
         "price_type": PriceType.BID,
     }
+
+    with sqlite3.connect(tmp_path / "ib-daily.db") as connection:
+        stored_rows = connection.execute(
+            """
+            SELECT price_type, day, open, high, low, close, updated_at
+            FROM ib_daily_bars
+            """
+        ).fetchall()
+
+    assert len(stored_rows) == 1
+    assert stored_rows[0][:6] == ("bid", "2026-07-27", 1.31, 1.34, 1.3, 1.335)
+    assert stored_rows[0][6] is not None
 
 
 def test_direct_ib_daily_bar_requires_ib_provider(tmp_path: Path) -> None:
@@ -287,6 +310,67 @@ def test_direct_ib_daily_bar_requires_ib_provider(tmp_path: Path) -> None:
 
     with TestClient(create_app(settings)) as client:
         response = client.get("/api/v1/ib/daily", params={"day": "2026-07-27"})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Direct IB data requires DATA_PROVIDER=ib."}
+
+
+def test_direct_ib_weekly_bar_returns_gateway_ohlc(tmp_path: Path, monkeypatch) -> None:
+    settings = Settings(
+        data_provider="ib",
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'ib-weekly.db'}",
+        scheduler_enabled=False,
+    )
+    app = create_app(settings)
+    requested = {}
+
+    async def fetch_weekly_bar(*, pair, week_start, price_type):
+        requested.update(pair=pair, week_start=week_start, price_type=price_type)
+        return PriceBar(
+            price_type=price_type,
+            timestamp=datetime(2026, 7, 27, tzinfo=UTC),
+            open=Decimal("1.3100"),
+            close=Decimal("1.3400"),
+            high=Decimal("1.3500"),
+            low=Decimal("1.3000"),
+        )
+
+    monkeypatch.setattr(app.state.provider, "fetch_weekly_bar", fetch_weekly_bar)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/ib/weekly",
+            params={"week": "2026-W31", "price_type": "ask"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "provider": "ib",
+        "pair": "GBP/USD",
+        "bar_size": "1 week",
+        "price_type": "ask",
+        "week": "2026-W31",
+        "open": 1.31,
+        "close": 1.34,
+        "high": 1.35,
+        "low": 1.3,
+    }
+    assert requested == {
+        "pair": "GBPUSD",
+        "week_start": date(2026, 7, 27),
+        "price_type": PriceType.ASK,
+    }
+
+
+def test_direct_ib_weekly_bar_requires_ib_provider(tmp_path: Path) -> None:
+    settings = Settings(
+        data_provider="demo",
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'demo-weekly.db'}",
+        scheduler_enabled=False,
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/v1/ib/weekly", params={"week": "2026-W31"})
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Direct IB data requires DATA_PROVIDER=ib."}
@@ -683,6 +767,97 @@ def test_calendar_metrics_aggregate_daily_monthly_and_yearly_periods(tmp_path: P
         )
 
 
+def test_weekly_metrics_use_monday_based_iso_weeks(tmp_path: Path) -> None:
+    database_path = tmp_path / "weekly-metrics.db"
+    settings = Settings(
+        database_url=f"sqlite+aiosqlite:///{database_path}",
+        scheduler_enabled=False,
+    )
+
+    with TestClient(create_app(settings)) as client:
+        with sqlite3.connect(database_path) as connection:
+            connection.executemany(
+                """
+                INSERT INTO ohlc_bars (price_type, timestamp, open, high, low, close)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    ("midpoint", "2025-12-28 23:59:00.000000", 0.9, 1.0, 0.8, 0.95),
+                    ("midpoint", "2025-12-29 00:00:00.000000", 1.2, 1.4, 1.0, 1.3),
+                    ("midpoint", "2026-01-04 23:59:00.000000", 1.3, 1.5, 1.1, 1.4),
+                    ("midpoint", "2026-01-05 00:00:00.000000", 2.0, 2.2, 1.9, 2.1),
+                    ("midpoint", "2026-01-11 23:59:00.000000", 2.1, 2.3, 2.0, 2.2),
+                ],
+            )
+
+        weekly = client.get("/api/v1/metrics/weekly", params={"week": "2026-W01"})
+        assert weekly.status_code == 200
+        assert weekly.json() == {
+            "pair": "GBP/USD",
+            "bar_size": "1 min",
+            "price_type": "midpoint",
+            "timezone": "UTC",
+            "bar_count": 2,
+            "open": 1.2,
+            "close": 1.4,
+            "high": 1.5,
+            "low": 1.0,
+            "average_open_close": pytest.approx(1.3),
+            "average_high_low": pytest.approx(1.25),
+            "week": "2026-W01",
+        }
+
+        batch = client.get(
+            "/api/v1/metrics/weekly",
+            params={"start": "2025-W52", "end": "2026-W03"},
+        )
+        assert batch.status_code == 200
+        assert batch.json()["start"] == "2025-W52"
+        assert batch.json()["end"] == "2026-W03"
+        assert batch.json()["count"] == 3
+        assert [metric["week"] for metric in batch.json()["metrics"]] == [
+            "2025-W52",
+            "2026-W01",
+            "2026-W02",
+        ]
+
+        first_page = client.get(
+            "/api/v1/metrics/weekly",
+            params={"start": "2025-W52", "end": "2026-W03", "limit": 2},
+        )
+        assert first_page.status_code == 200
+        assert first_page.json()["has_more"] is True
+        assert first_page.json()["next_cursor"] == "2026-W01"
+        assert [metric["week"] for metric in first_page.json()["metrics"]] == [
+            "2026-W01",
+            "2026-W02",
+        ]
+
+        second_page = client.get(
+            "/api/v1/metrics/weekly",
+            params={
+                "start": "2025-W52",
+                "end": "2026-W03",
+                "cursor": first_page.json()["next_cursor"],
+                "limit": 2,
+            },
+        )
+        assert second_page.status_code == 200
+        assert second_page.json()["has_more"] is False
+        assert [metric["week"] for metric in second_page.json()["metrics"]] == ["2025-W52"]
+
+        assert client.get("/api/v1/metrics/weekly", params={"week": "2025-W53"}).status_code == 422
+        assert client.get("/api/v1/metrics/weekly", params={"week": "1900-W01"}).status_code == 404
+        assert client.get("/api/v1/metrics/weekly").status_code == 422
+        assert (
+            client.get(
+                "/api/v1/metrics/weekly",
+                params={"week": "2026-W01", "start": "2026-W01", "end": "2026-W02"},
+            ).status_code
+            == 422
+        )
+
+
 def test_monthly_metrics_include_more_than_one_api_page_of_bars(tmp_path: Path) -> None:
     database_path = tmp_path / "large-month.db"
     settings = Settings(
@@ -762,6 +937,10 @@ def test_schema_migrates_existing_midpoint_table_to_composite_key(tmp_path: Path
 
     with sqlite3.connect(database_path) as connection:
         columns = connection.execute("PRAGMA table_info(ohlc_bars)").fetchall()
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
         migrated = connection.execute(
             "SELECT price_type, timestamp, open, high, low, close FROM ohlc_bars"
         ).fetchone()
@@ -779,4 +958,5 @@ def test_schema_migrates_existing_midpoint_table_to_composite_key(tmp_path: Path
     ]
     assert {column[1]: column[5] for column in columns}["price_type"] == 1
     assert {column[1]: column[5] for column in columns}["timestamp"] == 2
+    assert "ib_daily_bars" in tables
     assert migrated == ("midpoint", "2026-07-27 12:00:00", 0.77, 0.78, 0.76, 0.775)

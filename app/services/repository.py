@@ -4,14 +4,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import Integer, case, cast, func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from app.domain import PriceType
-from app.models import BackfillCheckpoint, MetricCacheState, OHLCBar
+from app.models import BackfillCheckpoint, IBDailyBar, MetricCacheState, OHLCBar
 from app.providers.base import PriceBar
 from app.services.cache import MetricCacheBackend, NullMetricCache
 
@@ -104,6 +104,43 @@ class BarRepository:
             except Exception:
                 logger.warning("Failed to clear the metric cache after a bar write", exc_info=True)
         return len(normalized)
+
+    async def upsert_ib_daily_bar(self, bar: PriceBar) -> None:
+        """Persist one native IB daily bar without mixing it with minute bars."""
+        value = {
+            "price_type": bar.price_type.value,
+            "day": as_utc(bar.timestamp).date(),
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+            "updated_at": datetime.now(UTC),
+        }
+        async with self._write_lock:
+            async with self.session_factory() as session:
+                dialect = session.bind.dialect.name if session.bind is not None else ""
+                if dialect == "postgresql":
+                    insert = postgresql_insert
+                elif dialect == "sqlite":
+                    insert = sqlite_insert
+                else:
+                    raise RuntimeError(
+                        f"Unsupported database dialect for daily bar upsert: {dialect}"
+                    )
+
+                statement = insert(IBDailyBar).values(value)
+                statement = statement.on_conflict_do_update(
+                    index_elements=[IBDailyBar.price_type, IBDailyBar.day],
+                    set_={
+                        "open": statement.excluded.open,
+                        "high": statement.excluded.high,
+                        "low": statement.excluded.low,
+                        "close": statement.excluded.close,
+                        "updated_at": statement.excluded.updated_at,
+                    },
+                )
+                await session.execute(statement)
+                await session.commit()
 
     async def _read_metric_cache(
         self,
@@ -309,7 +346,7 @@ class BarRepository:
         price_type: PriceType,
         start: datetime,
         end: datetime,
-        period: Literal["day", "month", "year"],
+        period: Literal["day", "week", "month", "year"],
         limit: int,
     ) -> tuple[list[BarPeriodSummary], bool]:
         """Return one keyset page of populated UTC calendar-period summaries."""
@@ -346,12 +383,21 @@ class BarRepository:
                     func.timezone("UTC", OHLCBar.timestamp),
                 )
             elif dialect == "sqlite":
-                period_formats = {
-                    "day": "%Y-%m-%d 00:00:00",
-                    "month": "%Y-%m-01 00:00:00",
-                    "year": "%Y-01-01 00:00:00",
-                }
-                period_expression = func.strftime(period_formats[period], OHLCBar.timestamp)
+                if period == "week":
+                    weekday = cast(func.strftime("%w", OHLCBar.timestamp), Integer)
+                    days_since_monday = (weekday + 6) % 7
+                    period_expression = func.datetime(
+                        OHLCBar.timestamp,
+                        "start of day",
+                        func.printf("-%d days", days_since_monday),
+                    )
+                else:
+                    period_formats = {
+                        "day": "%Y-%m-%d 00:00:00",
+                        "month": "%Y-%m-01 00:00:00",
+                        "year": "%Y-01-01 00:00:00",
+                    }
+                    period_expression = func.strftime(period_formats[period], OHLCBar.timestamp)
             else:
                 raise RuntimeError(f"Unsupported database dialect for period metrics: {dialect}")
 

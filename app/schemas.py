@@ -85,12 +85,29 @@ class DailyMetricsResponse(PeriodMetricsResponse):
     day: date
 
 
+class WeeklyMetricsResponse(PeriodMetricsResponse):
+    week: str
+
+
 class IBDailyBarResponse(BaseModel):
     provider: str
     pair: str
     bar_size: str
     price_type: PriceType
     day: date
+    open: float
+    close: float
+    high: float
+    low: float
+    stored: bool
+
+
+class IBWeeklyBarResponse(BaseModel):
+    provider: str
+    pair: str
+    bar_size: str
+    price_type: PriceType
+    week: str
     open: float
     close: float
     high: float
@@ -116,6 +133,19 @@ class DailyMetricsBatchResponse(BaseModel):
     has_more: bool
     next_cursor: date | None
     metrics: list[DailyMetricsResponse]
+
+
+class WeeklyMetricsBatchResponse(BaseModel):
+    pair: str
+    bar_size: str
+    price_type: PriceType
+    timezone: str
+    start: str
+    end: str
+    count: int
+    has_more: bool
+    next_cursor: str | None
+    metrics: list[WeeklyMetricsResponse]
 
 
 class MonthlyMetricsBatchResponse(BaseModel):

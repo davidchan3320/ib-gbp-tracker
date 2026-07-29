@@ -123,6 +123,50 @@ class IBHistoricalDataProvider(HistoricalDataProvider):
             except Exception as exc:
                 raise RuntimeError(f"IB daily historical data request failed: {exc}") from exc
 
+    async def fetch_weekly_bar(
+        self,
+        *,
+        pair: str,
+        week_start: date,
+        price_type: PriceType,
+    ) -> PriceBar | None:
+        """Fetch the weekly bar whose IB date belongs to the requested ISO week."""
+        if week_start.isoweekday() != 1:
+            raise ValueError("week_start must be a Monday")
+        try:
+            end_day = week_start + timedelta(days=7)
+        except OverflowError as exc:
+            raise ValueError("week_start must have a following ISO week") from exc
+
+        end_at = datetime.combine(end_day, time.min, tzinfo=UTC)
+        target_week = week_start.isocalendar()[:2]
+        async with self._request_lock:
+            try:
+                client, contract = await self._connected_contract(pair)
+                rows = list(
+                    await client.reqHistoricalDataAsync(
+                        contract,
+                        endDateTime=end_at,
+                        durationStr="2 W",
+                        barSizeSetting="1 week",
+                        whatToShow=IB_PRICE_TYPES[price_type],
+                        useRTH=False,
+                        formatDate=2,
+                        keepUpToDate=False,
+                        timeout=self.settings.ib_timeout_seconds,
+                    )
+                )
+                matching = [
+                    self._to_price_bar(row, price_type)
+                    for row in rows
+                    if self._timestamp_utc(row.date).date().isocalendar()[:2] == target_week
+                ]
+                return matching[-1] if matching else None
+            except IBConnectionError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(f"IB weekly historical data request failed: {exc}") from exc
+
     async def _connected_contract(self, pair: str) -> tuple[Any, Any]:
         # Import lazily so demo mode stays usable even if the Gateway stack changes.
         from ib_async import IB, Forex

@@ -22,12 +22,15 @@ from app.schemas import (
     DailyMetricsResponse,
     ErrorResponse,
     IBDailyBarResponse,
+    IBWeeklyBarResponse,
     MetricsResponse,
     MonthlyMetricsBatchResponse,
     MonthlyMetricsResponse,
     StatusResponse,
     SyncResponse,
     SyncRunResponse,
+    WeeklyMetricsBatchResponse,
+    WeeklyMetricsResponse,
     YearlyMetricsBatchResponse,
     YearlyMetricsResponse,
 )
@@ -55,6 +58,23 @@ def _next_month(value: datetime) -> datetime:
     if value.month == 12:
         return value.replace(year=value.year + 1, month=1)
     return value.replace(month=value.month + 1)
+
+
+def _parse_week(value: str, parameter_name: str) -> datetime:
+    try:
+        year_text, week_text = value.split("-W", maxsplit=1)
+        week_start = date.fromisocalendar(int(year_text), int(week_text), 1)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"'{parameter_name}' must be a valid ISO week in YYYY-Www format",
+        ) from exc
+    return datetime.combine(week_start, time.min, tzinfo=UTC)
+
+
+def _format_week(value: datetime | date) -> str:
+    iso_year, iso_week, _iso_weekday = value.isocalendar()
+    return f"{iso_year:04}-W{iso_week:02}"
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -99,7 +119,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="FX Tape API",
-        version="0.6.0",
+        version="0.8.0",
         description="Collect and inspect one-minute GBP/USD bid, ask, and midpoint OHLC bars.",
         lifespan=lifespan,
     )
@@ -143,6 +163,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             bar_size=runtime_settings.bar_size,
             price_type=price_type,
             month=period_month,
+            timezone="UTC",
+            **period_metric_fields(summary),
+        )
+
+    def weekly_metrics_response(
+        summary: BarPeriodSummary,
+        period_week: str,
+        price_type: PriceType,
+    ) -> WeeklyMetricsResponse:
+        return WeeklyMetricsResponse(
+            pair=runtime_settings.display_pair,
+            bar_size=runtime_settings.bar_size,
+            price_type=price_type,
+            week=period_week,
             timezone="UTC",
             **period_metric_fields(summary),
         )
@@ -361,17 +395,146 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.get(
+        "/api/v1/metrics/weekly",
+        response_model=WeeklyMetricsResponse | WeeklyMetricsBatchResponse,
+        responses={404: {"model": ErrorResponse}},
+        summary="Calculate metrics for one or more UTC ISO weeks",
+        description=(
+            "Pass `week` for one Monday-based ISO week, or pass both `start` and `end` for a "
+            "half-open batch range. `average_open_close` is `(open + close) / 2`; "
+            "`average_high_low` is `(high + low) / 2`."
+        ),
+        tags=["metrics"],
+    )
+    async def get_weekly_metrics(
+        week: Annotated[
+            str | None,
+            Query(
+                pattern=r"^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$",
+                description="Single UTC ISO week in `YYYY-Www` format.",
+            ),
+        ] = None,
+        start: Annotated[
+            str | None,
+            Query(
+                pattern=r"^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$",
+                description="Inclusive first UTC ISO week in a batch range.",
+            ),
+        ] = None,
+        end: Annotated[
+            str | None,
+            Query(
+                pattern=r"^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$",
+                description="Exclusive last UTC ISO week in a batch range.",
+            ),
+        ] = None,
+        cursor: Annotated[
+            str | None,
+            Query(
+                pattern=r"^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$",
+                description="Exclusive upper-bound ISO week returned by the previous batch page.",
+            ),
+        ] = None,
+        limit: Annotated[
+            int,
+            Query(ge=1, le=1_000, description="Maximum periods returned in one batch page."),
+        ] = 100,
+        price_type: PriceType = PriceType.MIDPOINT,
+    ) -> WeeklyMetricsResponse | WeeklyMetricsBatchResponse:
+        if week is not None:
+            if start is not None or end is not None or cursor is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="'week' cannot be combined with 'start', 'end', or 'cursor'",
+                )
+            week_start = _parse_week(week, "week")
+            try:
+                week_end = week_start + timedelta(days=7)
+            except OverflowError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="'week' must have a following ISO week",
+                ) from exc
+            summary = await repository.summarize_bars(
+                price_type=price_type,
+                start=week_start,
+                end=week_end,
+            )
+            if summary is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"No {price_type.value} bars stored for {week} UTC.",
+                )
+            return weekly_metrics_response(summary, week, price_type)
+
+        if start is None or end is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Provide either 'week' or both 'start' and 'end'",
+            )
+        range_start = _parse_week(start, "start")
+        range_end = _parse_week(end, "end")
+        if range_start >= range_end:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'start' must be earlier than 'end'",
+            )
+        if (range_end - range_start).days // 7 > MAX_METRIC_BATCH_PERIODS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"Weekly ranges cannot exceed {MAX_METRIC_BATCH_PERIODS} periods",
+            )
+        range_cursor = _parse_week(cursor, "cursor") if cursor is not None else None
+        if range_cursor is not None and range_cursor <= range_start:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'cursor' must be later than 'start'",
+            )
+        if range_cursor is not None and range_cursor > range_end:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'cursor' cannot be later than 'end'",
+            )
+
+        summaries, has_more = await repository.summarize_bars_by_period(
+            price_type=price_type,
+            start=range_start,
+            end=range_cursor or range_end,
+            period="week",
+            limit=limit,
+        )
+        metrics = [
+            weekly_metrics_response(summary, _format_week(summary.period_start), price_type)
+            for summary in summaries
+            if summary.period_start is not None
+        ]
+        return WeeklyMetricsBatchResponse(
+            pair=runtime_settings.display_pair,
+            bar_size=runtime_settings.bar_size,
+            price_type=price_type,
+            timezone="UTC",
+            start=start,
+            end=end,
+            count=len(metrics),
+            has_more=has_more,
+            next_cursor=metrics[0].week if has_more and metrics else None,
+            metrics=metrics,
+        )
+
+    @app.get(
         "/api/v1/ib/daily",
         response_model=IBDailyBarResponse,
         responses={
             404: {"model": ErrorResponse},
             502: {"model": ErrorResponse},
             503: {"model": ErrorResponse},
+            500: {"model": ErrorResponse},
         },
-        summary="Fetch one daily OHLC bar directly from Interactive Brokers",
+        summary="Fetch and store one daily OHLC bar from Interactive Brokers",
         description=(
             "Requests a `1 day` historical bar directly from IB Gateway and returns the bar "
-            "whose IB session date matches `day`. The response is not read from the database."
+            "whose IB session date matches `day`. A successful result is idempotently stored in "
+            "the database's dedicated `ib_daily_bars` table."
         ),
         tags=["market data"],
     )
@@ -412,12 +575,88 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     f"{day.isoformat()}."
                 ),
             )
+        try:
+            await repository.upsert_ib_daily_bar(bar)
+        except Exception as exc:
+            logger.exception("Failed to store the IB daily bar")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="IB daily bar was fetched but could not be stored.",
+            ) from exc
         return IBDailyBarResponse(
             provider="ib",
             pair=runtime_settings.display_pair,
             bar_size="1 day",
             price_type=price_type,
             day=day,
+            open=float(bar.open),
+            close=float(bar.close),
+            high=float(bar.high),
+            low=float(bar.low),
+            stored=True,
+        )
+
+    @app.get(
+        "/api/v1/ib/weekly",
+        response_model=IBWeeklyBarResponse,
+        responses={
+            404: {"model": ErrorResponse},
+            502: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+        summary="Fetch one weekly OHLC bar directly from Interactive Brokers",
+        description=(
+            "Requests a `1 week` historical bar directly from IB Gateway and returns the bar "
+            "whose IB date belongs to the requested Monday-based ISO week. The response is not "
+            "read from or written to the database."
+        ),
+        tags=["market data"],
+    )
+    async def get_ib_weekly_bar(
+        week: Annotated[
+            str,
+            Query(
+                pattern=r"^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$",
+                description="IB bar's ISO week in `YYYY-Www` format.",
+            ),
+        ],
+        price_type: PriceType = PriceType.MIDPOINT,
+    ) -> IBWeeklyBarResponse:
+        if not isinstance(provider, IBHistoricalDataProvider):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Direct IB data requires DATA_PROVIDER=ib.",
+            )
+        week_start = _parse_week(week, "week")
+        week_start_date = week_start.date()
+        if week_start_date > date.max - timedelta(days=7):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="'week' must have a following ISO week",
+            )
+
+        try:
+            bar = await provider.fetch_weekly_bar(
+                pair=runtime_settings.fx_pair,
+                week_start=week_start_date,
+                price_type=price_type,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=str(exc),
+            ) from exc
+        if bar is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"IB returned no {price_type.value} weekly bar for {week}.",
+            )
+        return IBWeeklyBarResponse(
+            provider="ib",
+            pair=runtime_settings.display_pair,
+            bar_size="1 week",
+            price_type=price_type,
+            week=week,
             open=float(bar.open),
             close=float(bar.close),
             high=float(bar.high),

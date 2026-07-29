@@ -18,10 +18,13 @@ description: Maintain and extend the FX Tape (ib-gbp-tracker) repository. Use fo
   user request and a separate safety design.
 - Interpret `GBPUSD` as USD per GBP. Interpret `USDGBP` as GBP per USD.
 - Normalize market-data timestamps to UTC before persistence and use half-open time ranges.
-- Store one configured currency pair and bar size per database. The current rows do not contain pair
-  or bar-size dimensions; add both to the key before supporting multiple series in one database.
+- Store one configured currency pair and minute-bar size per database. The current rows do not
+  contain pair or bar-size dimensions; add both to the relevant keys before supporting multiple
+  configured series in one database. Native IB daily rows are the fixed-`1 day` exception below.
 - Preserve `(price_type, timestamp)` as the `ohlc_bars` identity unless performing an explicit
   schema migration. Valid price types are `bid`, `ask`, and `midpoint`.
+- Keep native IB daily bars in `ib_daily_bars`, keyed by `(price_type, day)`. Do not mix them with
+  the configured minute series in `ohlc_bars`, which has no bar-size dimension.
 - Keep bar writes idempotent. Overlapping collection windows must update existing rows instead of
   creating duplicates.
 - Advance the metric-cache generation in the same transaction as bar writes, then clear disposable
@@ -41,8 +44,9 @@ Describe the current implementation accurately:
 - The default scheduler runs every 60 seconds. The first sync requests `HISTORY_DURATION` (default
   one day); later one-minute syncs request a one-hour overlap.
 - At the default interval, routine collection averages `3 / 60 = 0.05` historical requests per
-  second. Connection and contract qualification add occasional messages. The direct daily endpoint
-  sends one historical request. Each backfill day sends three historical requests.
+  second. Connection and contract qualification add occasional messages. Each direct daily or
+  weekly endpoint call sends one historical request. Each backfill day sends three historical
+  requests.
 - IB's usual socket pacing allowance is 50 outgoing requests per second with the default 100 market
   data lines, but historical-data pacing and soft throttling are additional constraints. Preserve
   request serialization, retries, and a non-zero real-Gateway backfill delay.

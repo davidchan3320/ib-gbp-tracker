@@ -3,7 +3,7 @@
   "info": {
     "title": "FX Tape API",
     "description": "Collect and inspect one-minute GBP/USD bid, ask, and midpoint OHLC bars.",
-    "version": "0.6.0"
+    "version": "0.8.0"
   },
   "paths": {
     "/healthz": {
@@ -296,13 +296,164 @@
         }
       }
     },
+    "/api/v1/metrics/weekly": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "Calculate metrics for one or more UTC ISO weeks",
+        "description": "Pass `week` for one Monday-based ISO week, or pass both `start` and `end` for a half-open batch range. `average_open_close` is `(open + close) / 2`; `average_high_low` is `(high + low) / 2`.",
+        "operationId": "get_weekly_metrics_api_v1_metrics_weekly_get",
+        "parameters": [
+          {
+            "name": "week",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^\\d{4}-W(0[1-9]|[1-4]\\d|5[0-3])$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Single UTC ISO week in `YYYY-Www` format.",
+              "title": "Week"
+            },
+            "description": "Single UTC ISO week in `YYYY-Www` format."
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^\\d{4}-W(0[1-9]|[1-4]\\d|5[0-3])$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inclusive first UTC ISO week in a batch range.",
+              "title": "Start"
+            },
+            "description": "Inclusive first UTC ISO week in a batch range."
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^\\d{4}-W(0[1-9]|[1-4]\\d|5[0-3])$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Exclusive last UTC ISO week in a batch range.",
+              "title": "End"
+            },
+            "description": "Exclusive last UTC ISO week in a batch range."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^\\d{4}-W(0[1-9]|[1-4]\\d|5[0-3])$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Exclusive upper-bound ISO week returned by the previous batch page.",
+              "title": "Cursor"
+            },
+            "description": "Exclusive upper-bound ISO week returned by the previous batch page."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "description": "Maximum periods returned in one batch page.",
+              "default": 100,
+              "title": "Limit"
+            },
+            "description": "Maximum periods returned in one batch page."
+          },
+          {
+            "name": "price_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PriceType",
+              "default": "midpoint"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/WeeklyMetricsResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WeeklyMetricsBatchResponse"
+                    }
+                  ],
+                  "title": "Response Get Weekly Metrics Api V1 Metrics Weekly Get"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/ib/daily": {
       "get": {
         "tags": [
           "market data"
         ],
-        "summary": "Fetch one daily OHLC bar directly from Interactive Brokers",
-        "description": "Requests a `1 day` historical bar directly from IB Gateway and returns the bar whose IB session date matches `day`. The response is not read from the database.",
+        "summary": "Fetch and store one daily OHLC bar from Interactive Brokers",
+        "description": "Requests a `1 day` historical bar directly from IB Gateway and returns the bar whose IB session date matches `day`. A successful result is idempotently stored in the database's dedicated `ib_daily_bars` table.",
         "operationId": "get_ib_daily_bar_api_v1_ib_daily_get",
         "parameters": [
           {
@@ -334,6 +485,101 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/IBDailyBarResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/ib/weekly": {
+      "get": {
+        "tags": [
+          "market data"
+        ],
+        "summary": "Fetch one weekly OHLC bar directly from Interactive Brokers",
+        "description": "Requests a `1 week` historical bar directly from IB Gateway and returns the bar whose IB date belongs to the requested Monday-based ISO week. The response is not read from or written to the database.",
+        "operationId": "get_ib_weekly_bar_api_v1_ib_weekly_get",
+        "parameters": [
+          {
+            "name": "week",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{4}-W(0[1-9]|[1-4]\\d|5[0-3])$",
+              "description": "IB bar's ISO week in `YYYY-Www` format.",
+              "title": "Week"
+            },
+            "description": "IB bar's ISO week in `YYYY-Www` format."
+          },
+          {
+            "name": "price_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PriceType",
+              "default": "midpoint"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IBWeeklyBarResponse"
                 }
               }
             }
@@ -1137,6 +1383,10 @@
           "low": {
             "type": "number",
             "title": "Low"
+          },
+          "stored": {
+            "type": "boolean",
+            "title": "Stored"
           }
         },
         "type": "object",
@@ -1149,9 +1399,62 @@
           "open",
           "close",
           "high",
-          "low"
+          "low",
+          "stored"
         ],
         "title": "IBDailyBarResponse"
+      },
+      "IBWeeklyBarResponse": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "pair": {
+            "type": "string",
+            "title": "Pair"
+          },
+          "bar_size": {
+            "type": "string",
+            "title": "Bar Size"
+          },
+          "price_type": {
+            "$ref": "#/components/schemas/PriceType"
+          },
+          "week": {
+            "type": "string",
+            "title": "Week"
+          },
+          "open": {
+            "type": "number",
+            "title": "Open"
+          },
+          "close": {
+            "type": "number",
+            "title": "Close"
+          },
+          "high": {
+            "type": "number",
+            "title": "High"
+          },
+          "low": {
+            "type": "number",
+            "title": "Low"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider",
+          "pair",
+          "bar_size",
+          "price_type",
+          "week",
+          "open",
+          "close",
+          "high",
+          "low"
+        ],
+        "title": "IBWeeklyBarResponse"
       },
       "MetricsResponse": {
         "properties": {
@@ -1629,6 +1932,140 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "WeeklyMetricsBatchResponse": {
+        "properties": {
+          "pair": {
+            "type": "string",
+            "title": "Pair"
+          },
+          "bar_size": {
+            "type": "string",
+            "title": "Bar Size"
+          },
+          "price_type": {
+            "$ref": "#/components/schemas/PriceType"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone"
+          },
+          "start": {
+            "type": "string",
+            "title": "Start"
+          },
+          "end": {
+            "type": "string",
+            "title": "End"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "metrics": {
+            "items": {
+              "$ref": "#/components/schemas/WeeklyMetricsResponse"
+            },
+            "type": "array",
+            "title": "Metrics"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pair",
+          "bar_size",
+          "price_type",
+          "timezone",
+          "start",
+          "end",
+          "count",
+          "has_more",
+          "next_cursor",
+          "metrics"
+        ],
+        "title": "WeeklyMetricsBatchResponse"
+      },
+      "WeeklyMetricsResponse": {
+        "properties": {
+          "pair": {
+            "type": "string",
+            "title": "Pair"
+          },
+          "bar_size": {
+            "type": "string",
+            "title": "Bar Size"
+          },
+          "price_type": {
+            "$ref": "#/components/schemas/PriceType"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone"
+          },
+          "bar_count": {
+            "type": "integer",
+            "title": "Bar Count"
+          },
+          "open": {
+            "type": "number",
+            "title": "Open"
+          },
+          "close": {
+            "type": "number",
+            "title": "Close"
+          },
+          "high": {
+            "type": "number",
+            "title": "High"
+          },
+          "low": {
+            "type": "number",
+            "title": "Low"
+          },
+          "average_open_close": {
+            "type": "number",
+            "title": "Average Open Close"
+          },
+          "average_high_low": {
+            "type": "number",
+            "title": "Average High Low"
+          },
+          "week": {
+            "type": "string",
+            "title": "Week"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pair",
+          "bar_size",
+          "price_type",
+          "timezone",
+          "bar_count",
+          "open",
+          "close",
+          "high",
+          "low",
+          "average_open_close",
+          "average_high_low",
+          "week"
+        ],
+        "title": "WeeklyMetricsResponse"
       },
       "YearlyMetricsBatchResponse": {
         "properties": {

@@ -232,8 +232,9 @@ key is `(price_type, timestamp)`, so one minute can contain independent `bid`, `
 rows without duplicates. A separate timestamp index supports cross-series time-range queries. The
 final three fields are nullable because IB does not provide meaningful centralized volume, WAP, or
 trade count for spot FX bid/ask/midpoint history. Pair, bar size, provider, generated IDs, audit
-timestamps, and sync history are not persisted. Calendar metric results may be stored temporarily
-in the configured SQL or Redis cache described below; bars remain their source of truth.
+timestamps, and sync history are not persisted on these rows. Native IB daily OHLC results use the
+separate `ib_daily_bars` table. Calendar metric results may be stored temporarily in the configured
+SQL or Redis cache described below; `ohlc_bars` remains the source of truth for those aggregates.
 
 The separate `backfill_checkpoints` table stores only resumable job state. It advances after a day's
 bars commit, so an interruption can repeat one idempotent upsert but cannot skip a completed chunk.
@@ -314,9 +315,11 @@ to zero against a real Gateway.
 | `GET` | `/healthz` | Process liveness |
 | `GET` | `/api/v1/status` | Collector, database, cache backend, and latest sync state |
 | `GET` | `/api/v1/bars` | Time-range and cursor-paginated `bid`, `ask`, or `midpoint` bars |
-| `GET` | `/api/v1/ib/daily` | Fetch one daily OHLC bar directly from IB Gateway |
+| `GET` | `/api/v1/ib/daily` | Fetch and store one daily OHLC bar from IB Gateway |
+| `GET` | `/api/v1/ib/weekly` | Fetch one weekly OHLC bar directly from IB Gateway |
 | `GET` | `/api/v1/metrics` | Midpoint price, 24h range/change, SMA 20, ATR 14, realized vol |
 | `GET` | `/api/v1/metrics/daily` | OHLC and two averages for one day or a day range |
+| `GET` | `/api/v1/metrics/weekly` | OHLC and two averages for one ISO week or a week range |
 | `GET` | `/api/v1/metrics/monthly` | OHLC and two averages for one month or a month range |
 | `GET` | `/api/v1/metrics/yearly` | OHLC and two averages for one year or a year range |
 | `POST` | `/api/v1/sync` | Run one collection immediately |
@@ -344,25 +347,37 @@ curl --get http://127.0.0.1:8000/api/v1/bars \
 behavior of returning the most recent bars. Timestamps without an explicit offset are interpreted
 as UTC.
 
-Fetch one daily bar directly from IB Gateway without reading or writing the application database:
+Fetch native daily or weekly bars directly from IB Gateway:
 
 ```bash
 curl --get http://127.0.0.1:8000/api/v1/ib/daily \
   --data-urlencode 'day=2026-07-27' \
   --data-urlencode 'price_type=midpoint'
+
+curl --get http://127.0.0.1:8000/api/v1/ib/weekly \
+  --data-urlencode 'week=2026-W31' \
+  --data-urlencode 'price_type=midpoint'
 ```
 
-This endpoint requires `DATA_PROVIDER=ib`. It makes one IB historical-data request with a `1 day`
-bar size and returns `open`, `close`, `high`, and `low` for the matching IB session date. Choose
-`bid`, `ask`, or `midpoint` with `price_type`; the default is `midpoint`. A market holiday or other
-date for which IB returns no matching session bar produces `404`.
+These endpoints require `DATA_PROVIDER=ib`. Each makes one IB historical-data request using the
+native `1 day` or `1 week` bar size and returns `open`, `close`, `high`, and `low`. A successful
+daily response has `stored: true` and is upserted into `ib_daily_bars`; fetching the same day and
+price type again refreshes that row instead of creating a duplicate. Native daily bars remain
+separate from the configured one-minute rows in `ohlc_bars`. The weekly endpoint accepts a
+Monday-based ISO week in `YYYY-Www` format and is not persisted. Choose `bid`, `ask`, or `midpoint`
+with `price_type`; the default is `midpoint`. A period for which IB returns no matching bar produces
+`404`.
 
-Request calendar-period metrics with a required day, month, or year and an optional price type
-(default: `midpoint`):
+Request calendar-period metrics with a required day, ISO week, month, or year and an optional price
+type (default: `midpoint`):
 
 ```bash
 curl --get http://127.0.0.1:8000/api/v1/metrics/daily \
   --data-urlencode 'day=2026-07-27' \
+  --data-urlencode 'price_type=midpoint'
+
+curl --get http://127.0.0.1:8000/api/v1/metrics/weekly \
+  --data-urlencode 'week=2026-W31' \
   --data-urlencode 'price_type=midpoint'
 
 curl --get http://127.0.0.1:8000/api/v1/metrics/monthly \
@@ -382,6 +397,10 @@ curl --get http://127.0.0.1:8000/api/v1/metrics/daily \
   --data-urlencode 'start=2026-07-01' \
   --data-urlencode 'end=2026-08-01' \
   --data-urlencode 'limit=10'
+
+curl --get http://127.0.0.1:8000/api/v1/metrics/weekly \
+  --data-urlencode 'start=2026-W01' \
+  --data-urlencode 'end=2027-W01'
 
 curl --get http://127.0.0.1:8000/api/v1/metrics/monthly \
   --data-urlencode 'start=2026-01' \
@@ -444,7 +463,8 @@ Example batch page:
 
 Each request covers the corresponding half-open UTC calendar interval. `open` comes from the first
 stored bar, `close` from the last stored bar, `high` and `low` are the period's extremes, and
-`bar_count` shows how many stored bars contributed. The derived fields are:
+`bar_count` shows how many stored bars contributed. ISO weeks begin Monday at 00:00 UTC, including
+weeks that cross calendar-year boundaries. The derived fields are:
 
 ```text
 average_open_close = (open + close) / 2
@@ -509,9 +529,10 @@ tools. Regenerate it after changing routes or schemas:
 make openapi
 ```
 
-Only one configured pair and bar size are stored per database. The three price types are identified
-inside the composite primary key. Supporting multiple pairs or bar sizes in one database would
-require adding those series dimensions to the key.
+Only one configured pair and minute-bar size are stored per database. The three price types are
+identified inside each table's composite primary key, while `ib_daily_bars` is a fixed-`1 day`
+series for the same pair. Supporting multiple pairs or configured minute-bar sizes in one database
+would require adding those series dimensions to the keys.
 
 ## Extend metrics
 
