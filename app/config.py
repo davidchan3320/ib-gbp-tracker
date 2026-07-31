@@ -1,3 +1,4 @@
+import re
 from datetime import date
 from functools import lru_cache
 from typing import Literal, Self
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     fx_pair: str = "GBPUSD"
     bar_size: str = "1 min"
     history_duration: str = "1 D"
+    demo_history_duration: str = "5 D"
     sync_interval_seconds: int = Field(default=60, ge=15)
     sync_on_startup: bool = True
     scheduler_enabled: bool = True
@@ -60,6 +62,15 @@ class Settings(BaseSettings):
             choices = ", ".join(SUPPORTED_BAR_SIZES)
             raise ValueError(f"bar_size must be one of: {choices}")
         return value
+
+    @field_validator("history_duration", "demo_history_duration")
+    @classmethod
+    def validate_history_duration(cls, value: str) -> str:
+        normalized = value.upper().strip()
+        match = re.fullmatch(r"(\d+)\s*([SDWMY])", normalized)
+        if match is None or int(match.group(1)) < 1:
+            raise ValueError("history duration must use IB format, for example '5 D' or '1 Y'")
+        return f"{int(match.group(1))} {match.group(2)}"
 
     @field_validator("metrics_cache_backend", mode="before")
     @classmethod

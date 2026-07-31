@@ -3,7 +3,7 @@
   "info": {
     "title": "FX Tape API",
     "description": "Collect and inspect one-minute GBP/USD bid, ask, and midpoint OHLC bars.",
-    "version": "0.9.0"
+    "version": "0.11.0"
   },
   "paths": {
     "/healthz": {

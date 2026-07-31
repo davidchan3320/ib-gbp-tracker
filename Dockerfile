@@ -27,7 +27,7 @@ FROM ${PYTHON_IMAGE} AS runtime
 
 LABEL org.opencontainers.image.title="FX Tape" \
       org.opencontainers.image.description="GBP/USD OHLC collector for Interactive Brokers" \
-      org.opencontainers.image.version="0.6.0"
+      org.opencontainers.image.version="0.11.0"
 
 ENV PATH="/opt/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \

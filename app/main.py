@@ -120,7 +120,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="FX Tape API",
-        version="0.9.0",
+        version="0.11.0",
         description="Collect and inspect one-minute GBP/USD bid, ask, and midpoint OHLC bars.",
         lifespan=lifespan,
     )

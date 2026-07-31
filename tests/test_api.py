@@ -40,6 +40,7 @@ def test_demo_sync_persists_and_exposes_bars(tmp_path: Path) -> None:
     settings = Settings(
         data_provider="demo",
         database_url=f"sqlite+aiosqlite:///{database_path}",
+        demo_history_duration="1 D",
         scheduler_enabled=False,
         sync_on_startup=False,
     )
@@ -232,6 +233,29 @@ def test_dashboard_and_health_are_served(tmp_path: Path) -> None:
         page = client.get("/")
         assert page.status_code == 200
         assert "FX Tape" in page.text
+        assert 'data-range="180D"' in page.text
+        dashboard_script = client.get("/assets/app.js")
+        assert dashboard_script.status_code == 200
+        assert "/api/v1/metrics/daily" in dashboard_script.text
+
+
+def test_demo_sync_seeds_configured_multi_day_history(tmp_path: Path) -> None:
+    settings = Settings(
+        data_provider="demo",
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'multi-day-demo.db'}",
+        bar_size="1 hour",
+        demo_history_duration="5 D",
+        scheduler_enabled=False,
+    )
+
+    with TestClient(create_app(settings)) as client:
+        sync_response = client.post("/api/v1/sync")
+        bars_response = client.get("/api/v1/bars", params={"limit": 1_000})
+
+    assert sync_response.status_code == 200
+    assert sync_response.json()["bars_received"] > 0
+    bars = bars_response.json()["bars"]
+    assert 1 < len(bars) <= 5 * 24
 
 
 def test_direct_ib_daily_bar_returns_gateway_ohlc(tmp_path: Path, monkeypatch) -> None:
@@ -491,6 +515,7 @@ def test_metric_api_database_cache_hits_and_invalidates_on_sync(tmp_path: Path) 
     settings = Settings(
         data_provider="demo",
         database_url=f"sqlite+aiosqlite:///{database_path}",
+        demo_history_duration="1 D",
         scheduler_enabled=False,
         metrics_cache_ttl_seconds=300,
     )
@@ -557,6 +582,7 @@ def test_metric_api_cache_can_be_disabled(tmp_path: Path) -> None:
     settings = Settings(
         data_provider="demo",
         database_url=f"sqlite+aiosqlite:///{database_path}",
+        demo_history_duration="1 D",
         scheduler_enabled=False,
         metrics_cache_ttl_seconds=0,
     )
@@ -584,6 +610,7 @@ def test_metric_api_can_use_separate_sqlite_cache_database(tmp_path: Path) -> No
     settings = Settings(
         data_provider="demo",
         database_url=f"sqlite+aiosqlite:///{database_path}",
+        demo_history_duration="1 D",
         scheduler_enabled=False,
         metrics_cache_backend="sqlite",
         metrics_cache_url=f"sqlite+aiosqlite:///{cache_path}",

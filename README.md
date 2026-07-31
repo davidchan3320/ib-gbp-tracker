@@ -6,9 +6,9 @@ SQLite or PostgreSQL, calculates live and calendar-period metrics, and serves a 
 plus a documented REST API. A separate CLI owns the resumable historical backfill, while SQLite,
 PostgreSQL, or Redis can cache calendar aggregates.
 
-The app starts in **demo mode**, so the entire collector, database, chart, and metrics path can be
-evaluated without an IB account. Switching one environment variable activates the real IB
-Gateway provider.
+The app starts in **demo mode**, replaying the bundled `fx-chart-nuxt/content/daily.csv` GBP/USD
+history through the collector, database, chart, and metrics path without requiring an IB account.
+Switching one environment variable activates the real IB Gateway provider.
 
 ## Agent skill set
 
@@ -100,8 +100,8 @@ uv run uvicorn app.main:app --reload
 ```
 
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000), or verify it with
-`curl http://127.0.0.1:8000/healthz`. The scheduler creates a synthetic initial history in the
-background, and API documentation is available at
+`curl http://127.0.0.1:8000/healthz`. The scheduler creates five days of CSV-backed demo minute
+history in the background, and API documentation is available at
 [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
 Stop the supporting containers with `docker compose stop db redis`, or use `docker compose down`.
@@ -240,11 +240,37 @@ those aggregates.
 The separate `backfill_checkpoints` table stores only resumable job state. It advances after a day's
 bars commit, so an interruption can repeat one idempotent upsert but cannot skip a completed chunk.
 
-The first successful run requests `HISTORY_DURATION` (one day by default). Later one-minute runs
-request a one-hour overlap for each price type. Rewriting that overlap is deliberate: IB can revise
-the latest incomplete bar, while the composite primary key prevents duplicates. It also avoids
-repeatedly pulling the entire backfill and helps stay within IB's
+In demo mode, the first successful run requests `DEMO_HISTORY_DURATION` (five days by default).
+Only dates represented in the CSV replay are written, so weekends and other source gaps do not
+produce stale rows. If an older demo database has less coverage, the next sync adds only the missing
+older segment; a bounded market-gap tolerance prevents empty weekends at a window boundary from
+causing repeated backfill. After an ordinary restart it catches up only the recent gap. Real IB mode
+uses `HISTORY_DURATION` (one day by default). Later one-minute runs request a one-hour overlap for
+each price type. Rewriting that overlap is deliberate: IB can revise the latest incomplete bar,
+while the composite primary key prevents duplicates. It also avoids repeatedly pulling the entire
+backfill and helps stay within IB's
 [historical-data request limits](https://interactivebrokers.github.io/tws-api/historical_limitations.html).
+The demo generator writes at most 50,000 time buckets per chunk, so longer custom windows are
+filled without truncation. For a complete 180-day dashboard test window, set
+`DEMO_HISTORY_DURATION=180 D`; at one-minute resolution the calendar window contains up to 259,200
+buckets and 777,600 rows across bid, ask, and midpoint, with fewer rows where the CSV has market
+gaps. The dashboard renders its 1M and 180D ranges from daily aggregates rather than transferring
+every stored minute.
+
+### CSV demo data
+
+The bundled [`app/demo_data/daily.csv`](app/demo_data/daily.csv) is a verbatim snapshot of
+`fx-chart-nuxt/content/daily.csv`: 1,193 complete GBP/USD daily rows from 2022-01-03 through
+2026-07-30 plus its trailing partial 2026-07-31 row. The provider uses the source dates unchanged,
+creates deterministic continuation candles after the snapshot, and omits unrecorded dates within
+the source range. The source is midpoint GBP/USD; small deterministic spreads produce bid and ask.
+
+For intraday bar sizes, a deterministic path visits the source open at 00:00 UTC, high at 08:00,
+low at 16:00, and close at 24:00. A complete UTC day's midpoint aggregation therefore reproduces
+the source daily candle. Fourteen source rows have a high or low that does not contain their open or
+close; the loader expands those bounds to maintain valid OHLC without changing the vendored file.
+Weekly, monthly, and yearly results continue to be calculated from the stored intraday rows, keeping
+one database source of truth. Volume, trade count, and intraday path shape remain simulated.
 
 ## Backfill from 2017
 

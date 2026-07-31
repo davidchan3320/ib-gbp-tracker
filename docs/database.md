@@ -12,7 +12,7 @@ corresponding native IB periods.
 ## Data flow
 
 ```text
-IB Gateway / demo provider
+IB Gateway / CSV demo replay
           │
    ┌──────┼──────────────┐
    ▼      ▼              ▼
@@ -215,6 +215,12 @@ This remains stable when new bars arrive because later pages always move toward 
 Offset pagination is intentionally not used because large offsets become increasingly expensive and
 can shift when concurrent inserts occur.
 
+The dashboard uses minute bars for its 1D and 5D views. Its 1M and 180D views call the daily metrics
+range endpoint, which keeps chart payloads small even when `DEMO_HISTORY_DURATION=180 D` stores
+up to 259,200 one-minute buckets per price type. CSV source gaps reduce the actual count. Demo
+collection writes long configured windows in chunks of at most 50,000 time slots; that is a
+per-write memory bound, not a total-history limit.
+
 ## Metric cache
 
 The cache stores JSON summaries for single calendar periods and cursor-paginated batch pages. The
@@ -327,6 +333,7 @@ For a first demo environment, the relevant settings are:
 ```dotenv
 DATA_PROVIDER=demo
 FX_PAIR=GBPUSD
+DEMO_HISTORY_DURATION=5 D
 
 APP_PORT=8000
 POSTGRES_PORT=5432

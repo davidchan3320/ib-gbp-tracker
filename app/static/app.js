@@ -1,8 +1,9 @@
 const state = {
   bars: [],
+  aggregateBars: {},
   metrics: null,
   status: null,
-  range: "1M",
+  range: "5D",
   hoverIndex: null,
   geometry: null,
   lastDigits: null,
@@ -105,7 +106,7 @@ async function apiFetch(path, options = {}) {
 async function loadDashboard({ quiet = false } = {}) {
   const [statusResult, barsResult, metricsResult] = await Promise.allSettled([
     apiFetch("/api/v1/status"),
-    apiFetch("/api/v1/bars?price_type=midpoint&limit=1500"),
+    apiFetch("/api/v1/bars?price_type=midpoint&limit=7500"),
     apiFetch("/api/v1/metrics"),
   ]);
 
@@ -118,8 +119,14 @@ async function loadDashboard({ quiet = false } = {}) {
 
   if (barsResult.status === "fulfilled") {
     state.bars = barsResult.value.bars;
+    state.aggregateBars = {};
     renderInstrumentMetadata(barsResult.value);
     renderTable();
+    try {
+      await loadAggregateBars(state.range);
+    } catch (error) {
+      if (!quiet) showToast(error.message, "error");
+    }
     drawChart();
   } else if (!quiet) {
     showToast(barsResult.reason.message, "error");
@@ -208,10 +215,10 @@ function renderStatus() {
   document.querySelector("#mode-badge").textContent =
     status.provider === "demo" ? "Demo mode" : "IB Gateway";
   document.querySelector("#source-name").textContent =
-    status.provider === "demo" ? "Market simulator" : "IB Gateway";
+    status.provider === "demo" ? "CSV market replay" : "IB Gateway";
   document.querySelector("#source-detail").textContent =
     status.provider === "demo"
-      ? `Deterministic ${status.pair} feed`
+      ? `fx-chart-nuxt daily OHLC · ${status.pair}`
       : `${status.gateway_host}:${status.gateway_port} · socket API`;
 
   const collectorStage = document.querySelector('[data-stage="collector"]');
@@ -319,11 +326,42 @@ function renderTable() {
 
 function visibleBars() {
   if (!state.bars.length) return [];
+  if (state.aggregateBars[state.range]) return state.aggregateBars[state.range];
   const hours = { "1D": 24, "5D": 24 * 5, "1M": 24 * 31 }[state.range];
   const latest = parseApiDate(state.bars.at(-1).timestamp).getTime();
   const cutoff = latest - hours * 60 * 60 * 1000;
   const selected = state.bars.filter((bar) => parseApiDate(bar.timestamp).getTime() >= cutoff);
   return selected.length >= 2 ? selected : state.bars.slice(-Math.min(80, state.bars.length));
+}
+
+async function loadAggregateBars(range) {
+  const days = { "1M": 31, "180D": 180 }[range];
+  if (!days || state.aggregateBars[range] || !state.bars.length) return;
+
+  const latest = parseApiDate(state.bars.at(-1).timestamp);
+  const end = new Date(
+    Date.UTC(latest.getUTCFullYear(), latest.getUTCMonth(), latest.getUTCDate() + 1),
+  );
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - days);
+  const params = new URLSearchParams({
+    start: start.toISOString().slice(0, 10),
+    end: end.toISOString().slice(0, 10),
+    limit: String(days),
+    price_type: "midpoint",
+  });
+  const response = await apiFetch(`/api/v1/metrics/daily?${params}`);
+  state.aggregateBars[range] = response.metrics.map((metric) => ({
+    price_type: metric.price_type,
+    timestamp: `${metric.day}T00:00:00Z`,
+    open: metric.open,
+    high: metric.high,
+    low: metric.low,
+    close: metric.close,
+    volume: null,
+    weighted_average_price: null,
+    trade_count: null,
+  }));
 }
 
 function drawChart() {
@@ -546,14 +584,24 @@ function updateClocks() {
 }
 
 document.querySelectorAll("[data-range]").forEach((button) => {
-  button.addEventListener("click", () => {
+  button.addEventListener("click", async () => {
+    const previousRange = state.range;
     state.range = button.dataset.range;
     state.hoverIndex = null;
     elements.tooltip.hidden = true;
     document.querySelectorAll("[data-range]").forEach((item) => {
       item.classList.toggle("active", item === button);
     });
-    drawChart();
+    try {
+      await loadAggregateBars(state.range);
+      drawChart();
+    } catch (error) {
+      state.range = previousRange;
+      document.querySelectorAll("[data-range]").forEach((item) => {
+        item.classList.toggle("active", item.dataset.range === previousRange);
+      });
+      showToast(error.message, "error");
+    }
   });
 });
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ib-gbp-tracker"
-version = "0.9.0"
+version = "0.11.0"
 description = "GBP/USD OHLC collector and analytics dashboard for IB Gateway"
 readme = "README.md"
 requires-python = ">=3.11"

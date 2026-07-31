@@ -11,10 +11,11 @@ def test_pair_is_normalized() -> None:
 
 
 def test_one_minute_bars_are_the_default() -> None:
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.fx_pair == "GBPUSD"
     assert settings.display_pair == "GBP/USD"
     assert settings.bar_size == "1 min"
+    assert settings.demo_history_duration == "5 D"
     assert settings.sync_interval_seconds == 60
     assert settings.metrics_cache_ttl_seconds == 300
     assert settings.resolved_metrics_cache_backend == "sqlite"
@@ -26,6 +27,11 @@ def test_one_minute_bars_are_the_default() -> None:
 def test_invalid_bar_size_is_rejected() -> None:
     with pytest.raises(ValidationError):
         Settings(bar_size="7 minutes")
+
+
+def test_invalid_history_duration_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Settings(demo_history_duration="five days")
 
 
 def test_invalid_metrics_cache_ttl_is_rejected() -> None:

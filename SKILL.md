@@ -43,8 +43,11 @@ Describe the current implementation accurately:
   `reqHistoricalDataAsync()` requests per sync: `BID`, `ASK`, and `MIDPOINT`.
 - The IB connection is read-only, `useRTH` is false, timestamps use `formatDate=2`, and
   `keepUpToDate` is false.
-- The default scheduler runs every 60 seconds. The first sync requests `HISTORY_DURATION` (default
-  one day); later one-minute syncs request a one-hour overlap.
+- The default scheduler runs every 60 seconds. Demo mode seeds `DEMO_HISTORY_DURATION` (default
+  five days) from bundled `fx-chart-nuxt` daily GBP/USD OHLC, extends short coverage with only the
+  missing older segment, tolerates bounded market gaps at window edges, and catches up recent gaps.
+  It chunks windows longer than 50,000 time slots without truncation. IB mode's first sync
+  requests `HISTORY_DURATION` (default one day); later one-minute syncs request a one-hour overlap.
 - At the default interval, routine collection averages `3 / 60 = 0.05` historical requests per
   second. Connection and contract qualification add occasional messages. Each direct daily,
   weekly, or monthly endpoint call sends one historical request. Each backfill day sends three

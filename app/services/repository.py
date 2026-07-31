@@ -524,6 +524,14 @@ class BarRepository:
             result = await session.scalar(select(func.count(OHLCBar.timestamp)))
             return int(result or 0)
 
-    async def latest_timestamp(self) -> datetime | None:
+    async def timestamp_bounds(self) -> tuple[datetime | None, datetime | None]:
         async with self.session_factory() as session:
-            return await session.scalar(select(func.max(OHLCBar.timestamp)))
+            row = (
+                await session.execute(
+                    select(
+                        func.min(OHLCBar.timestamp),
+                        func.max(OHLCBar.timestamp),
+                    )
+                )
+            ).one()
+            return row[0], row[1]
